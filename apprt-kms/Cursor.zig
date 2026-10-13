@@ -38,6 +38,9 @@ hidden_by_core: bool = false,
 /// False if the hardware cursor isn't usable.
 available: bool = false,
 
+/// For logging the first successful enable only.
+logged_enable: bool = false,
+
 /// False while we don't own the seat (and so can't touch the hardware).
 /// State changes made meanwhile are pushed by the next `apply`.
 active: bool = true,
@@ -135,6 +138,10 @@ pub fn apply(self: *Cursor) void {
         log.info("driver rejected hardware cursor errno={}, cursor disabled", .{err});
         self.available = false;
         return;
+    }
+    if (!self.logged_enable) {
+        self.logged_enable = true;
+        log.info("hardware cursor enabled size={}x{} scale={}", .{ self.size, self.size, self.scale });
     }
     _ = c.drmModeMoveCursor(fd, self.drm.crtc_id, self.x - self.hot_x, self.y - self.hot_y);
 }

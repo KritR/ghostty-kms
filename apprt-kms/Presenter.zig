@@ -549,33 +549,11 @@ fn draw(self: *Presenter) void {
 fn importDmabuf(self: *Presenter, dmabuf: Dmabuf) !void {
     const image_target = self.image_target_texture orelse return error.Unsupported;
 
-    var attrs: [6 + Dmabuf.max_planes * 10 + 1]egl.c.EGLAttrib = undefined;
-    var n: usize = 0;
-    const add = struct {
-        fn add(buf: []egl.c.EGLAttrib, i: *usize, k: c_int, v: egl.c.EGLAttrib) void {
-            buf[i.*] = k;
-            buf[i.* + 1] = v;
-            i.* += 2;
-        }
-    }.add;
-
-    add(&attrs, &n, egl.c.EGL_WIDTH, @intCast(dmabuf.width));
-    add(&attrs, &n, egl.c.EGL_HEIGHT, @intCast(dmabuf.height));
-    add(&attrs, &n, EGL_LINUX_DRM_FOURCC_EXT, @intCast(dmabuf.fourcc));
-    for (0..dmabuf.planes.count) |i| {
-        const p = plane_attrs[i];
-        add(&attrs, &n, p.fd, dmabuf.planes.fds[i]);
-        add(&attrs, &n, p.offset, dmabuf.planes.offsets[i]);
-        add(&attrs, &n, p.pitch, dmabuf.planes.strides[i]);
-        if (dmabuf.modifier != DRM_FORMAT_MOD_INVALID) {
-            add(&attrs, &n, p.mod_lo, @intCast(dmabuf.modifier & 0xffffffff));
-            add(&attrs, &n, p.mod_hi, @intCast(dmabuf.modifier >> 32));
-        }
-    }
-    attrs[n] = egl.c.EGL_NONE;
-
-    const image = egl.c.eglCreateImage(self.display, null, EGL_LINUX_DMA_BUF_EXT, null, &attrs);
-    if (image == null) {
+    // Pass the modifier explicitly when we know it. Some drivers reject an
+    // explicit modifier they don't advertise for the format (commonly
+    // LINEAR), so fall back to an implicit modifier.
+    const image = self.createDmabufImage(dmabuf, true) orelse
+        (if (dmabuf.modifier != DRM_FORMAT_MOD_INVALID) self.createDmabufImage(dmabuf, false) else null) orelse {
         log.warn("eglCreateImage(dmabuf) failed fourcc=0x{x} modifier=0x{x} planes={} err={}", .{
             dmabuf.fourcc,
             dmabuf.modifier,
@@ -583,7 +561,7 @@ fn importDmabuf(self: *Presenter, dmabuf: Dmabuf) !void {
             egl.mustError(),
         });
         return error.ImportFailed;
-    }
+    };
 
     // Try GL_TEXTURE_2D first; some drivers only allow external images.
     _ = c.glGetError();
@@ -617,6 +595,35 @@ fn importDmabuf(self: *Presenter, dmabuf: Dmabuf) !void {
     // tex_2d now aliases the image; force a realloc on the next upload.
     self.upload_w = 0;
     self.upload_h = 0;
+}
+
+fn createDmabufImage(self: *Presenter, dmabuf: Dmabuf, with_modifier: bool) egl.c.EGLImage {
+    var attrs: [6 + Dmabuf.max_planes * 10 + 1]egl.c.EGLAttrib = undefined;
+    var n: usize = 0;
+    const add = struct {
+        fn add(buf: []egl.c.EGLAttrib, i: *usize, k: c_int, v: egl.c.EGLAttrib) void {
+            buf[i.*] = k;
+            buf[i.* + 1] = v;
+            i.* += 2;
+        }
+    }.add;
+
+    add(&attrs, &n, egl.c.EGL_WIDTH, @intCast(dmabuf.width));
+    add(&attrs, &n, egl.c.EGL_HEIGHT, @intCast(dmabuf.height));
+    add(&attrs, &n, EGL_LINUX_DRM_FOURCC_EXT, @intCast(dmabuf.fourcc));
+    for (0..dmabuf.planes.count) |i| {
+        const p = plane_attrs[i];
+        add(&attrs, &n, p.fd, dmabuf.planes.fds[i]);
+        add(&attrs, &n, p.offset, dmabuf.planes.offsets[i]);
+        add(&attrs, &n, p.pitch, dmabuf.planes.strides[i]);
+        if (with_modifier and dmabuf.modifier != DRM_FORMAT_MOD_INVALID) {
+            add(&attrs, &n, p.mod_lo, @intCast(dmabuf.modifier & 0xffffffff));
+            add(&attrs, &n, p.mod_hi, @intCast(dmabuf.modifier >> 32));
+        }
+    }
+    attrs[n] = egl.c.EGL_NONE;
+
+    return egl.c.eglCreateImage(self.display, null, EGL_LINUX_DMA_BUF_EXT, null, &attrs);
 }
 
 fn uploadMemory(self: *Presenter, memory: ExportedFrame.Memory) void {

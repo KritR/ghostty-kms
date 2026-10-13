@@ -1,11 +1,12 @@
 //! The kms apprt App: owns the seat, the DRM output, the presenter, input
 //! and the single fullscreen surface, and runs the main loop.
 //!
-//! Main loop: every event source we have is a file descriptor (seat, DRM
-//! page-flip events, libinput, the key-repeat timer and an eventfd that
-//! other threads write to in `wakeup`), so the loop is a plain poll(2)
-//! followed by a core tick. Everything here runs on the main thread; the
-//! renderer and termio run on their own threads inside the core.
+//! Main loop: libxev (the same loop Ghostty's renderer and termio threads
+//! use) watches the seat fd, the DRM fd (page-flip events), the libinput
+//! fd and the key-repeat timerfd, plus an `xev.Async` that `wakeup`
+//! notifies from other threads. After each loop iteration we tick the
+//! core. Everything here runs on the main thread; the renderer and termio
+//! run on their own threads inside the core.
 const App = @This();
 
 const std = @import("std");
@@ -15,6 +16,8 @@ const gl = @import("opengl");
 const egl = gl.egl;
 const apprt = @import("../../apprt.zig");
 const configpkg = @import("../../config.zig");
+const global = @import("../../global.zig");
+const xev = global.xev;
 const Config = configpkg.Config;
 const inputpkg = @import("../../input.zig");
 const terminal = @import("../../terminal/main.zig");
@@ -50,8 +53,17 @@ render_node: ?RenderNode = null,
 /// The one and only surface. Null once it has closed.
 surface: ?*Surface = null,
 
-/// eventfd written by `wakeup` (any thread) and the signal handler.
-wake_fd: c_int,
+loop: xev.Loop,
+
+/// Notified by `wakeup` (any thread) and the signal handler.
+wakeup_h: xev.Async,
+wakeup_c: xev.Completion = .{},
+
+/// Readiness watches for our file descriptors.
+seat_c: xev.Completion = .{},
+drm_c: xev.Completion = .{},
+input_c: xev.Completion = .{},
+repeat_c: xev.Completion = .{},
 
 running: bool = true,
 
@@ -77,7 +89,7 @@ const RenderNode = struct {
 };
 
 /// Set by the signal handler; read by the main loop.
-var signal_wake_fd: c_int = -1;
+var signal_wakeup: ?*xev.Async = null;
 var signal_quit: std.atomic.Value(bool) = .init(false);
 
 pub fn init(
@@ -90,10 +102,11 @@ pub fn init(
     _ = opts;
     const alloc = core_app.alloc;
 
-    // The wakeup fd must exist before anything can call `wakeup`.
-    const wake_fd = c.eventfd(0, c.EFD_CLOEXEC | c.EFD_NONBLOCK);
-    if (wake_fd < 0) return error.EventFdFailed;
-    errdefer _ = c.close(wake_fd);
+    // The wakeup handle must exist before anything can call `wakeup`.
+    var loop = try xev.Loop.init(.{});
+    errdefer loop.deinit();
+    var wakeup_h = try xev.Async.init();
+    errdefer wakeup_h.deinit();
 
     var config = Config.load(alloc) catch |err| err: {
         log.err("error loading config, using defaults err={}", .{err});
@@ -112,12 +125,13 @@ pub fn init(
         .input = undefined,
         .cursor = undefined,
         .render_display = undefined,
-        .wake_fd = wake_fd,
+        .loop = loop,
+        .wakeup_h = wakeup_h,
         .content_scale = 1,
         .force_cpu = if (util.env("GHOSTTY_KMS_PRESENT")) |v| std.mem.eql(u8, v, "cpu") else false,
     };
 
-    installSignalHandlers(wake_fd);
+    installSignalHandlers(&self.wakeup_h);
 
     try self.seat.init();
     errdefer self.seat.deinit();
@@ -172,38 +186,21 @@ pub fn init(
 }
 
 pub fn run(self: *App) !void {
+    self.wakeup_h.wait(&self.loop, &self.wakeup_c, App, self, onWakeup);
+    watch(&self.loop, &self.seat_c, self.seat.fd(), self, onSeatReadable);
+    watch(&self.loop, &self.drm_c, self.drm.fd(), self, onDrmReadable);
+    watch(&self.loop, &self.input_c, self.input.fd(), self, onInputReadable);
+    watch(&self.loop, &self.repeat_c, self.input.repeat_fd, self, onRepeatReadable);
+
     while (self.running) {
-        var fds = [_]c.struct_pollfd{
-            .{ .fd = self.wake_fd, .events = c.POLLIN, .revents = 0 },
-            .{ .fd = self.seat.fd(), .events = c.POLLIN, .revents = 0 },
-            .{ .fd = self.drm.fd(), .events = c.POLLIN, .revents = 0 },
-            .{ .fd = self.input.fd(), .events = c.POLLIN, .revents = 0 },
-            .{ .fd = self.input.repeat_fd, .events = c.POLLIN, .revents = 0 },
-        };
+        // Block until at least one source fires, handle all ready ones.
+        try self.loop.run(.once);
 
-        if (c.poll(&fds, fds.len, -1) < 0) {
-            if (util.errno() == c.EINTR) continue;
-            log.err("poll failed errno={}", .{util.errno()});
-            return error.PollFailed;
-        }
-
-        if (fds[0].revents != 0) {
-            var buf: u64 = 0;
-            _ = c.read(self.wake_fd, &buf, @sizeOf(u64));
-        }
         if (signal_quit.load(.acquire)) {
             log.info("quit signal received", .{});
             self.running = false;
             break;
         }
-
-        if (fds[1].revents != 0) self.seat.dispatch() catch |err| {
-            log.err("seat dispatch failed err={}", .{err});
-            return err;
-        };
-        if (fds[2].revents != 0) self.presenter.dispatchDrmEvents();
-        if (fds[3].revents != 0) self.input.dispatch();
-        if (fds[4].revents != 0) self.input.handleRepeat();
 
         // Process the core's mailbox. This is where surface messages such
         // as "a frame is ready" turn into performAction calls.
@@ -220,6 +217,64 @@ pub fn run(self: *App) !void {
     }
 }
 
+const FdCallback = *const fn (self: *App) void;
+
+/// Watch `fd` for readability, calling `cb` each time it's readable.
+fn watch(
+    loop: *xev.Loop,
+    completion: *xev.Completion,
+    fd: c_int,
+    self: *App,
+    comptime cb: FdCallback,
+) void {
+    xev.File.initFd(fd).poll(loop, completion, .read, App, self, (struct {
+        fn callback(
+            ud: ?*App,
+            _: *xev.Loop,
+            _: *xev.Completion,
+            _: xev.File,
+            r: xev.PollError!xev.PollEvent,
+        ) xev.CallbackAction {
+            _ = r catch |err| {
+                log.err("error polling fd err={}", .{err});
+                return .disarm;
+            };
+            cb(ud.?);
+            return .rearm;
+        }
+    }).callback);
+}
+
+fn onWakeup(
+    _: ?*App,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    r: xev.Async.WaitError!void,
+) xev.CallbackAction {
+    _ = r catch |err| log.err("error in wakeup err={}", .{err});
+    // Nothing else to do: the core tick runs after every loop iteration.
+    return .rearm;
+}
+
+fn onSeatReadable(self: *App) void {
+    self.seat.dispatch() catch |err| {
+        log.err("seat dispatch failed err={}; exiting", .{err});
+        self.running = false;
+    };
+}
+
+fn onDrmReadable(self: *App) void {
+    self.presenter.dispatchDrmEvents();
+}
+
+fn onInputReadable(self: *App) void {
+    self.input.dispatch();
+}
+
+fn onRepeatReadable(self: *App) void {
+    self.input.handleRepeat();
+}
+
 pub fn terminate(self: *App) void {
     self.closeSurface();
     self.seat.handler = null;
@@ -231,14 +286,14 @@ pub fn terminate(self: *App) void {
     self.drm.deinit(self.alloc, &self.seat);
     self.seat.deinit();
     self.config.deinit();
-    signal_wake_fd = -1;
-    _ = c.close(self.wake_fd);
+    signal_wakeup = null;
+    self.wakeup_h.deinit();
+    self.loop.deinit();
 }
 
 /// Called by the core (from any thread) to wake up the main loop.
 pub fn wakeup(self: *App) void {
-    const one: u64 = 1;
-    _ = c.write(self.wake_fd, &one, @sizeOf(u64));
+    self.wakeup_h.notify() catch |err| log.warn("error waking up main loop err={}", .{err});
 }
 
 pub fn keyboardLayout(self: *const App) inputpkg.KeyboardLayout {
@@ -466,8 +521,8 @@ fn closeRenderNode(rn: RenderNode) void {
 //-------------------------------------------------------------------
 // Signals
 
-fn installSignalHandlers(wake_fd: c_int) void {
-    signal_wake_fd = wake_fd;
+fn installSignalHandlers(wakeup_h: *xev.Async) void {
+    signal_wakeup = wakeup_h;
     // A handler rather than a blocked mask + signalfd: Ghostty resets
     // handlers but not the mask before exec'ing the shell, so a blocked
     // mask would leak into every child.
@@ -484,9 +539,6 @@ fn installSignalHandlers(wake_fd: c_int) void {
 fn handleSignal(sig: std.posix.SIG) callconv(.c) void {
     _ = sig;
     signal_quit.store(true, .release);
-    const fd = signal_wake_fd;
-    if (fd >= 0) {
-        const one: u64 = 1;
-        _ = c.write(fd, &one, @sizeOf(u64));
-    }
+    // Async.notify is a single write(2) to an eventfd: signal safe.
+    if (signal_wakeup) |h| h.notify() catch {};
 }

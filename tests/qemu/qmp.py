@@ -14,6 +14,7 @@ Commands:
   quit                       stop QEMU
   wait-log PATTERN [SECS]    wait until serial.log contains PATTERN
   pixel FILE.png X Y         print the R G B of a pixel in a screenshot
+  size FILE.png              print the width and height of a screenshot
   expect-color FILE.png X Y R G B [TOL]   exit 1 unless the pixel matches
 """
 
@@ -168,6 +169,11 @@ def main(argv: list[str]):
             time.sleep(0.5)
         print(f"timed out waiting for {pattern!r}", file=sys.stderr)
         return 1
+
+    if cmd == "size":
+        w, h, _, _ = read_png(Path(rest[0]))
+        print(w, h)
+        return 0
 
     if cmd == "pixel":
         print(*pixel(Path(rest[0]), int(rest[1]), int(rest[2])))

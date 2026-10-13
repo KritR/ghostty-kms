@@ -85,6 +85,7 @@ q type 'echo got-'
 q key ctrl-shift-v
 q type " > $serial\n"
 check "double-click selection, copy and paste" q wait-log "got-pastetoken" 20
+check "mouse shows the hardware cursor" grep -q "hardware cursor enabled" "$out/serial.log"
 
 # Scrollback with the mouse wheel changes what's on screen.
 q type 'clear; seq 1 300\n'
@@ -105,6 +106,23 @@ check "Ctrl+C interrupts the foreground job" q wait-log "interrupted-by-sigint" 
 # Exiting the shell exits Ghostty cleanly.
 q type 'exit\n'
 check "Ghostty exits when the shell exits" q wait-log "ghostty exited: 0" 20
+sleep 1
+
+# Relaunch from the console shell with an explicit mode and scale.
+q type "GHOSTTY_KMS_MODE=1024x768 GHOSTTY_KMS_SCALE=2 ghostty 2> $serial\n"
+check "GHOSTTY_KMS_MODE selects the mode" q wait-log "mode=1024x768" 60
+check "GHOSTTY_KMS_SCALE sets the content scale" q wait-log "content scale=2" 10
+q wait-log "first frame presented" 60 >/dev/null || true
+sleep 3
+q type 'printf "\\e[48;2;0;200;0m \\e[0m"\n'
+sleep 1.5
+q screenshot "$shots/scaled.png"
+check "screen is 1024x768" bash -c "[ \"\$(uv run -q '$here/qmp.py' size '$shots/scaled.png')\" = '1024 768' ]"
+# Row 0 is the prompt + command; the green cell is at the start of row 1.
+# At scale 2 a cell is ~22x50 px plus 8 px padding, so (12, 8+50+25) is
+# inside it; at scale 1 that point would be on row 3.
+check "text is drawn at 2x scale" q expect-color "$shots/scaled.png" 12 83 0 200 0 2
+q type 'exit\n'
 
 if grep -q "panic\|segmentation fault\|error(kms" "$out/serial.log"; then
   fail "no panics or kms errors in the log"
