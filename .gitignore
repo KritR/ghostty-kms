@@ -1,3 +1,4 @@
 upstream/
 result
 result-*
+tests/qemu/out/

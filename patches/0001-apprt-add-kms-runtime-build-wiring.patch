@@ -1,0 +1,216 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Krithik <krithik@gradientrobotics.ai>
+Date: Tue, 13 Oct 2026 16:41:49 -0700
+Subject: [PATCH] apprt: add kms runtime (build wiring)
+
+Adds the `kms` value to the app runtime enum, selects src/apprt/kms in
+apprt.zig, links EGL for it, calls the kms build wiring in SharedDeps,
+and adds .kms to the exhaustive app_runtime switches.
+
+The runtime itself lives in src/apprt/kms, which is copied in from the
+ghostty-raw-term repo and is not part of this patch.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/apprt.zig                 | 2 ++
+ src/apprt/action.zig          | 2 +-
+ src/apprt/runtime.zig         | 4 ++++
+ src/apprt/structs.zig         | 4 ++--
+ src/apprt/surface.zig         | 2 +-
+ src/build/SharedDeps.zig      | 5 +++--
+ src/config/Config.zig         | 6 +++---
+ src/datastruct/split_tree.zig | 2 +-
+ src/font/face.zig             | 2 +-
+ src/input/Binding.zig         | 2 +-
+ src/terminal/mouse.zig        | 2 +-
+ 11 files changed, 20 insertions(+), 13 deletions(-)
+
+diff --git a/src/apprt.zig b/src/apprt.zig
+index ef788c9bb..08c6fbe55 100644
+--- a/src/apprt.zig
++++ b/src/apprt.zig
+@@ -15,6 +15,7 @@ const structs = @import("apprt/structs.zig");
+ pub const action = @import("apprt/action.zig");
+ pub const ipc = @import("apprt/ipc.zig");
+ pub const gtk = @import("apprt/gtk.zig");
++pub const kms = @import("apprt/kms/main.zig");
+ pub const none = @import("apprt/none.zig");
+ pub const browser = @import("apprt/browser.zig");
+ pub const embedded = @import("apprt/embedded.zig");
+@@ -44,6 +45,7 @@ pub const runtime = switch (build_config.artifact) {
+     .exe => switch (build_config.app_runtime) {
+         .none => none,
+         .gtk => gtk,
++        .kms => kms,
+     },
+     .lib => embedded,
+     .wasm_module => browser,
+diff --git a/src/apprt/action.zig b/src/apprt/action.zig
+index e58260cfb..173a8f6a7 100644
+--- a/src/apprt/action.zig
++++ b/src/apprt/action.zig
+@@ -736,7 +736,7 @@ pub const InitialSize = extern struct {
+             .{ .name = "GhosttyApprtInitialSize" },
+         ),
+ 
+-        .none => void,
++        .none, .kms => void,
+     };
+ };
+ 
+diff --git a/src/apprt/runtime.zig b/src/apprt/runtime.zig
+index 1be503536..0826db457 100644
+--- a/src/apprt/runtime.zig
++++ b/src/apprt/runtime.zig
+@@ -11,6 +11,10 @@ pub const Runtime = enum {
+     /// approach to building the application.
+     gtk,
+ 
++    /// Bare Linux console via DRM/KMS, libinput and libseat. Single
++    /// fullscreen surface, no windowing system. (ghostty-raw-term patch)
++    kms,
++
+     pub fn default(target: std.Target) Runtime {
+         return switch (target.os.tag) {
+             // The Linux and FreeBSD default is GTK because it is a full
+diff --git a/src/apprt/structs.zig b/src/apprt/structs.zig
+index d8510fb84..079973c70 100644
+--- a/src/apprt/structs.zig
++++ b/src/apprt/structs.zig
+@@ -56,7 +56,7 @@ pub const Clipboard = enum(Backing) {
+             .{ .name = "GhosttyApprtClipboard" },
+         ),
+ 
+-        .none => void,
++        .none, .kms => void,
+     };
+ };
+ 
+@@ -219,7 +219,7 @@ pub const ClipboardRequest = union(ClipboardRequestType) {
+             .{ .name = "GhosttyClipboardRequest" },
+         ),
+ 
+-        .none => void,
++        .none, .kms => void,
+     };
+ };
+ 
+diff --git a/src/apprt/surface.zig b/src/apprt/surface.zig
+index 3b1a04d8a..fb7b2725f 100644
+--- a/src/apprt/surface.zig
++++ b/src/apprt/surface.zig
+@@ -178,7 +178,7 @@ pub const Message = union(enum) {
+                 .{ .name = "GhosttyApprtChildExited" },
+             ),
+ 
+-            .none => void,
++            .none, .kms => void,
+         };
+     };
+ };
+diff --git a/src/build/SharedDeps.zig b/src/build/SharedDeps.zig
+index 1f4143fcd..b86ac10e1 100644
+--- a/src/build/SharedDeps.zig
++++ b/src/build/SharedDeps.zig
+@@ -662,8 +662,8 @@ pub fn add(
+             .flags = &.{},
+         });
+ 
+-        // Link EGL for GTK.
+-        if (self.config.app_runtime == .gtk) {
++        // Link EGL for GTK and KMS.
++        if (self.config.app_runtime == .gtk or self.config.app_runtime == .kms) {
+             step.root_module.addCSourceFile(.{
+                 .file = b.path("vendor/glad/src/glad_egl.c"),
+                 .flags = &.{},
+@@ -691,6 +691,7 @@ pub fn add(
+         switch (self.config.app_runtime) {
+             .none => {},
+             .gtk => try self.addGtkNg(step),
++            .kms => try @import("../apprt/kms/build.zig").add(b, step, dynamic_link_opts),
+         }
+     }
+ 
+diff --git a/src/config/Config.zig b/src/config/Config.zig
+index fd6d8cf38..fc58c7b06 100644
+--- a/src/config/Config.zig
++++ b/src/config/Config.zig
+@@ -4886,7 +4886,7 @@ pub fn finalize(self: *Config) !void {
+ 
+     // Apprt-specific defaults
+     switch (build_config.app_runtime) {
+-        .none => {},
++        .none, .kms => {},
+         .gtk => {
+             switch (self.@"gtk-single-instance") {
+                 .true, .false => {},
+@@ -9348,7 +9348,7 @@ pub const GtkTitlebarStyle = enum(c_int) {
+             .{ .name = "GhosttyGtkTitlebarStyle" },
+         ),
+ 
+-        .none => void,
++        .none, .kms => void,
+     };
+ };
+ 
+@@ -10070,7 +10070,7 @@ pub const WindowDecoration = enum(c_int) {
+             .{ .name = "GhosttyConfigWindowDecoration" },
+         ),
+ 
+-        .none => void,
++        .none, .kms => void,
+     };
+ 
+     pub fn parseCLI(input_: ?[]const u8) !WindowDecoration {
+diff --git a/src/datastruct/split_tree.zig b/src/datastruct/split_tree.zig
+index 012f107f3..fc8a60988 100644
+--- a/src/datastruct/split_tree.zig
++++ b/src/datastruct/split_tree.zig
+@@ -1365,7 +1365,7 @@ pub fn SplitTree(comptime V: type) type {
+                 },
+             ),
+ 
+-            .none => void,
++            .none, .kms => void,
+         };
+     };
+ }
+diff --git a/src/font/face.zig b/src/font/face.zig
+index aeb7280c7..2688a519b 100644
+--- a/src/font/face.zig
++++ b/src/font/face.zig
+@@ -64,7 +64,7 @@ pub const DesiredSize = struct {
+             .{ .name = "GhosttyFontDesiredSize" },
+         ),
+ 
+-        .none => void,
++        .none, .kms => void,
+     };
+ };
+ 
+diff --git a/src/input/Binding.zig b/src/input/Binding.zig
+index 6f2cc3136..cac8bde3b 100644
+--- a/src/input/Binding.zig
++++ b/src/input/Binding.zig
+@@ -998,7 +998,7 @@ pub const Action = union(enum) {
+             .{ .name = "GhosttyBindingAction" },
+         ),
+ 
+-        .none => void,
++        .none, .kms => void,
+     };
+ 
+     pub const CrashThread = enum {
+diff --git a/src/terminal/mouse.zig b/src/terminal/mouse.zig
+index 2b0740a32..d07a1ba37 100644
+--- a/src/terminal/mouse.zig
++++ b/src/terminal/mouse.zig
+@@ -87,7 +87,7 @@ pub const Shape = enum(c_int) {
+                 .{ .name = "GhosttyMouseShape" },
+             ),
+ 
+-            .none => void,
++            .none, .kms => void,
+         };
+     };
+ 

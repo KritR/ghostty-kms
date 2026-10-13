@@ -51,18 +51,47 @@
             mainProgram = "ghostty";
           };
       });
+
+    # NixOS guest for end-to-end tests under QEMU (see nix/test-vm.nix).
+    mkTestVm = system:
+      nixpkgs.lib.nixosSystem {
+        inherit system;
+        specialArgs.ghostty-kms = self.packages.${system}.ghostty-kms;
+        modules = [./nix/test-vm.nix];
+      };
   in {
+    nixosConfigurations = {
+      test-vm-x86_64-linux = mkTestVm "x86_64-linux";
+      test-vm-aarch64-linux = mkTestVm "aarch64-linux";
+    };
+
     packages = forSystems (system: pkgs: let
       up = ghostty.packages.${system};
     in rec {
       # Milestone 1: unmodified upstream from the pinned rev.
       ghostty-upstream = up.ghostty-releasefast;
 
+      # Upstream's pre-fetched Zig dependency cache, for offline
+      # `zig build --system <path>` during development (see README).
+      ghostty-deps = up.deps;
+
       ghostty-kms = mkKms pkgs up.ghostty-releasefast;
       ghostty-kms-debug = mkKms pkgs up.ghostty-debug;
       ghostty-kms-releasesafe = mkKms pkgs up.ghostty-releasesafe;
 
       default = ghostty-kms;
+
+      # Kernel, initrd and command line of the test guest, for
+      # tests/qemu/run.sh.
+      test-vm = let
+        cfg = self.nixosConfigurations."test-vm-${system}".config;
+      in
+        pkgs.runCommand "ghostty-kms-test-vm" {} ''
+          mkdir -p $out
+          ln -s ${cfg.system.build.kernel}/${cfg.system.boot.loader.kernelFile} $out/kernel
+          ln -s ${cfg.system.build.netbootRamdisk}/initrd $out/initrd
+          echo "init=${cfg.system.build.toplevel}/init ${toString cfg.boot.kernelParams}" > $out/cmdline
+        '';
     });
 
     # Development shell: upstream's shell plus the kms system libraries, for
