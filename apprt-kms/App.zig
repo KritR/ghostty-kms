@@ -436,6 +436,9 @@ fn maybePresent(self: *App) void {
         error.PresentFailed => {},
     };
     if (frame != null or self.presenter.source != .none) self.force_redraw = false;
+    // A failed modeset (e.g. racing a VT switch) is retried at the next
+    // wakeup rather than leaving a stale screen.
+    if (self.presenter.needs_modeset and self.presenter.source != .none) self.force_redraw = true;
 
     // A modeset resets the cursor plane.
     if (was_modeset and !self.presenter.needs_modeset) self.cursor.apply();

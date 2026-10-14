@@ -49,9 +49,12 @@ case "$(uname -s)-$system-$host_arch" in
     [ -w /dev/kvm ] && { accel=kvm; cpu=host; } ;;
 esac
 
+extra=()
 case "$system" in
   aarch64-linux) qemu="$qemu_pkg/bin/qemu-system-aarch64"; machine="virt" ;;
-  x86_64-linux) qemu="$qemu_pkg/bin/qemu-system-x86_64"; machine="q35" ;;
+  # No legacy VGA: virtio-gpu must be the only display, or screendumps
+  # capture the VGA text console instead.
+  x86_64-linux) qemu="$qemu_pkg/bin/qemu-system-x86_64"; machine="q35"; extra=(-vga none) ;;
 esac
 
 rm -f "$out/qmp.sock" "$out/serial.log"
@@ -65,6 +68,7 @@ args=(
   -serial "file:$out/serial.log"
   -qmp "unix:$out/qmp.sock,server,nowait"
   -nic none
+  ${extra[@]+"${extra[@]}"}
 )
 
 if [ "$foreground" = 1 ]; then

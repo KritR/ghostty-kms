@@ -111,6 +111,17 @@ with the repo shared: `scripts/vm-build.sh` wraps that). It uses
 upstream's dev shell and its pre-fetched Zig dependency cache, so it needs
 no network. The binary lands in `upstream/zig-out/bin/ghostty`.
 
+### No GTK
+
+The package is built without GTK and its neighbours (glib/GObject,
+GStreamer, X11, Wayland, ...): the runtime closure is about 120 MiB, and
+the build fails if any of them sneak back in. To check what a build
+fetches and builds as well:
+
+```bash
+scripts/check-no-gtk.sh
+```
+
 ### End-to-end test in QEMU
 
 `tests/qemu/` boots a NixOS guest with a virtio-gpu display (a real
@@ -148,7 +159,7 @@ mouse, and scroll; `tests/qemu/e2e.sh` runs a scripted check.
 
 | Target | Status |
 | --- | --- |
-| Intel/AMD + Mesa | Primary target. |
-| QEMU virtio-gpu + llvmpipe | Tested end to end (see above). |
+| Intel/AMD + Mesa | Primary target. Builds; not yet run on real hardware (the DMABUF zero-copy path needs a real GPU to exercise). |
+| QEMU virtio-gpu + llvmpipe | `tests/qemu/e2e.sh` passes on aarch64 (HVF) and x86_64 (emulated). |
 | NVIDIA Jetson (JetPack 6) | Not yet tried. See CLAUDE.md "Hardware notes"; `GHOSTTY_KMS_RENDER_DEVICE` exists for the split render/display devices. |
 | Raspberry Pi 4/5 | Not yet tried. Plan is llvmpipe (`LIBGL_ALWAYS_SOFTWARE=1`) since V3D lacks GL 4.3. |

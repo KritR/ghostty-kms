@@ -153,7 +153,7 @@ Override Ghostty's own flake package rather than forking:
 inputs.ghostty.url = "github:ghostty-org/ghostty/<pinned-rev>";
 
 ghostty-kms = ghostty.packages.${system}.ghostty-releasefast.overrideAttrs (old: {
-  patches = (old.patches or []) ++ [ ./patches/0001-add-kms-runtime.patch ];
+  patches = (old.patches or []) ++ (lib.filesystem.listFilesRecursive ./patches);
   postPatch = (old.postPatch or "") + ''
     cp -r ${./apprt-kms} src/apprt/kms
   '';
@@ -171,8 +171,20 @@ Rules:
 - **No new Zig package dependencies.** Upstream's Nix build pre-fetches Zig
   deps from `build.zig.zon.nix`; adding one means regenerating it. Link only C
   system libraries through pkg-config.
-- Upstream's package always pulls in GTK build inputs. That's fine to leave at
-  first; slim it later if it matters.
+- Upstream's package is built for GTK, so `mkKms` in `flake.nix` replaces
+  its input lists with whitelists instead of appending: no GTK4, libadwaita,
+  glib/GObject introspection, GStreamer, X11, Wayland or wrapGAppsHook4. It
+  also slims dependencies whose default nixpkgs builds link desktop libraries
+  (harfbuzz without glib, libxkbcommon without X11/Wayland, libinput without
+  libwacom, libglvnd without GLX), uses a copy of upstream's Zig dependency
+  cache without the GTK/Wayland binding packages (all lazy, only the GTK
+  runtime requests them), generates xkbcommon's Compose data from the libX11
+  source instead of the libX11 package, and deletes the libghostty-vt
+  library upstream always installs. `disallowedRequisites` fails the build if
+  any of that comes back into the runtime closure (118 MiB on x86_64, down
+  from 3.2 GiB); `scripts/check-no-gtk.sh` also checks what the build
+  fetches and builds. Expect these overrides to need touching on upstream or
+  nixpkgs bumps.
 - **Updating:** bump the pinned rev, rebuild, fix any failing hunks. Keep a
   local git branch of upstream with our commits on top and regenerate patches
   with `git format-patch`.
@@ -216,8 +228,10 @@ Everything should just work. Do all initial development here.
 ## Milestones
 
 Status as of 2026-10-13: 1-7 done and verified end to end in QEMU
-(`tests/qemu/e2e.sh`, 19 checks, aarch64 guest on virtio-gpu + llvmpipe;
-the x86_64 package also builds via Nix). 8 and 9 need the hardware.
+(`tests/qemu/e2e.sh`, 19 checks, passing on aarch64 and x86_64 guests on
+virtio-gpu + llvmpipe, i.e. the CPU frame path). Not yet done: running on
+real Intel/AMD hardware (exercises the DMABUF path), and 8/9, which need
+the boards.
 
 1. Flake builds unmodified upstream Ghostty from a pinned rev.
 2. `kms` runtime compiles as a stub (empty apprt, build wiring patch).
