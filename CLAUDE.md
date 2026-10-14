@@ -97,6 +97,54 @@ Re-verify against whatever revision is pinned; internals move fast.
 10. **Content scale:** derive from the connector's physical size in mm, with a
     config override.
 
+### Implementation notes (what was actually built)
+
+The design above is implemented in `apprt-kms/` (one file per numbered
+item: `Seat.zig`, `Drm.zig`, `Presenter.zig`, `Input.zig` + `Keyboard.zig`,
+`App.zig`, `Surface.zig`, `Cursor.zig`). Things learned or decided while
+building it:
+
+- **Orientation:** the presenter maps texture (0,0) to the bottom-left of the
+  GL window surface, which is already upright on screen (verified in QEMU).
+  The "flip" GTK does is because GTK's scene graph has a top-left origin;
+  only direct scanout of the renderer's buffer would need one. The shader
+  keeps a `flip_y` knob (`GHOSTTY_KMS_FLIP_Y=1`) as an escape hatch.
+- **kms-specific settings are environment variables** (`GHOSTTY_KMS_DEVICE`,
+  `_CONNECTOR`, `_MODE`, `_SCALE`, `_RENDER_DEVICE`, `_PRESENT=cpu`,
+  `_FLIP_Y`, `_REPEAT_DELAY`, `_REPEAT_RATE`, `_SEAT_TIMEOUT`; see README),
+  so the patch doesn't have to touch Ghostty's config parser. Regular
+  Ghostty config still applies.
+- **C interop** goes through one translated header, `apprt-kms/c.c`, wired
+  up with upstream's `translate_c` build helper (Zig 0.16 has no
+  `@cImport` in this codebase). EGL comes from Ghostty's glad bindings
+  (`@import("opengl").egl`) because glad's header refuses to coexist with
+  `<EGL/egl.h>`; the presenter's GLES 2 calls link `libGLESv2` directly.
+- **Main loop** is libxev as designed: `xev.Async` for `wakeup`, and
+  one-shot readiness polls (`xev.File.poll`, rearmed) on the seat, DRM,
+  libinput and key-repeat timerfd fds. Signals (INT/TERM/HUP) use a
+  handler that notifies the Async; not a blocked mask + signalfd, because
+  Ghostty resets handlers but not the signal mask before exec'ing the shell.
+- **Keyboard events mirror the GTK apprt**: text is the keysym's character
+  without control transformation (Ctrl+A gives "a"), C0 controls produce no
+  text, sided modifiers come from the physical key, consumed mods use
+  `XKB_CONSUMED_MODE_GTK`. Dead keys via xkbcommon compose. Ctrl+Alt+Fn
+  (`XF86Switch_VT_n` keysyms) switches VTs and isn't forwarded.
+- **Clipboard requests complete asynchronously** from the main loop (never
+  inside `clipboardRequest`, to stay out of the core's call stack and
+  locks). With no prompt UI: unsafe pastes from the in-process clipboard are
+  confirmed automatically (the data came from this terminal); program
+  clipboard access that the config says to "ask" about is denied.
+- **DMABUF import** retries with an implicit modifier if an explicit one is
+  rejected, then falls back to CPU frames via
+  `reportPresentationHealth(.unhealthy)`. Mesa's llvmpipe on `kms_swrast`
+  exports DMABUFs fine but can't import them (`EGL_BAD_ALLOC`), so software
+  rendering always ends up on the CPU path.
+- **The cursor plane** isn't touched while the seat is inactive (losing DRM
+  master races the disable notification) and is re-applied after the
+  modeset that follows re-enable.
+- **Seat acquisition times out** (10 s) with a clear error instead of hanging
+  when started outside a VT session (e.g. over SSH).
+
 ## Nix layout
 
 Override Ghostty's own flake package rather than forking:
@@ -167,6 +215,10 @@ Everything should just work. Do all initial development here.
 
 ## Milestones
 
+Status as of 2026-10-13: 1-7 done and verified end to end in QEMU
+(`tests/qemu/e2e.sh`, 19 checks, aarch64 guest on virtio-gpu + llvmpipe;
+the x86_64 package also builds via Nix). 8 and 9 need the hardware.
+
 1. Flake builds unmodified upstream Ghostty from a pinned rev.
 2. `kms` runtime compiles as a stub (empty apprt, build wiring patch).
 3. Modeset and page-flip a solid color through GBM/EGL on the dev machine.
@@ -176,6 +228,20 @@ Everything should just work. Do all initial development here.
 7. Mouse, scroll, in-process clipboard, content scale.
 8. Jetson bring-up.
 9. Pi bring-up on llvmpipe.
+
+## Testing
+
+- **Unit tests** in `apprt-kms` run with Ghostty's test step:
+  `scripts/dev-build.sh test -Dtest-filter=scaleFromDpi`.
+- **End to end:** `tests/qemu/` boots a NixOS guest (`nix/test-vm.nix`,
+  netboot-style kernel + initrd) with a virtio-gpu display, seatd and an
+  autologin on tty1 that starts Ghostty; Ghostty's log goes to the serial
+  console. `tests/qemu/e2e.sh` drives it over QMP and checks serial-console
+  markers (keyboard -> shell) and exact screenshot pixel colors (renderer
+  -> presenter -> KMS). On macOS: build the guest in a Linux VM (OrbStack;
+  the repo is shared), run QEMU on the Mac with HVF.
+- QEMU screendumps don't include the hardware cursor plane, so the e2e
+  test checks the "hardware cursor enabled" log line instead.
 
 ## Useful references
 

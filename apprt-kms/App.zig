@@ -132,6 +132,7 @@ pub fn init(
     };
 
     installSignalHandlers(&self.wakeup_h);
+    errdefer signal_wakeup = null;
 
     try self.seat.init();
     errdefer self.seat.deinit();

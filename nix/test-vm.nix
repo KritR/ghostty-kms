@@ -13,9 +13,9 @@
   lib,
   pkgs,
   modulesPath,
-  ghostty-kms,
   ...
 }: let
+  ghostty-kms = config.programs.ghostty-kms.package;
   serial =
     if pkgs.stdenv.hostPlatform.isAarch64
     then "ttyAMA0"
@@ -24,8 +24,6 @@
   # Started by the tty1 login shell. Logs go to the serial console.
   session = pkgs.writeShellScript "ghostty-kms-session" ''
     export GHOSTTY_KMS_SEAT_TIMEOUT=20000
-    # llvmpipe: virtio-gpu has no 3D without virgl.
-    export LIBGL_ALWAYS_SOFTWARE=1
     echo "=== starting ghostty on $(tty) ===" > /dev/${serial}
     ${lib.getExe ghostty-kms} 2>&1 | ${pkgs.coreutils}/bin/tee /tmp/ghostty.log > /dev/${serial}
     echo "=== ghostty exited: ''${PIPESTATUS[0]} ===" > /dev/${serial}
@@ -48,7 +46,11 @@ in {
   boot.initrd.availableKernelModules = ["virtio_gpu" "virtio_input" "virtio_pci"];
   boot.kernelModules = ["virtio_gpu"];
 
-  hardware.graphics.enable = true;
+  # llvmpipe: virtio-gpu has no 3D without virgl.
+  programs.ghostty-kms = {
+    enable = true;
+    softwareRendering = true;
+  };
 
   # libseat works with logind (default) or seatd; use seatd here to
   # exercise that path. Our user is in the `seat` group.
@@ -85,7 +87,6 @@ in {
   ];
 
   environment.systemPackages = [
-    ghostty-kms
     pkgs.libdrm # modetest, for debugging
   ];
 

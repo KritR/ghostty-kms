@@ -56,10 +56,11 @@
     mkTestVm = system:
       nixpkgs.lib.nixosSystem {
         inherit system;
-        specialArgs.ghostty-kms = self.packages.${system}.ghostty-kms;
-        modules = [./nix/test-vm.nix];
+        modules = [self.nixosModules.default ./nix/test-vm.nix];
       };
   in {
+    nixosModules.default = import ./nix/module.nix self;
+
     nixosConfigurations = {
       test-vm-x86_64-linux = mkTestVm "x86_64-linux";
       test-vm-aarch64-linux = mkTestVm "aarch64-linux";
