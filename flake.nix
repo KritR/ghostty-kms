@@ -296,11 +296,9 @@
       # the Pi's drivers and no software rasterizer:
       #
       #   - presenter (blit + scanout): native vc4/v3d, OpenGL ES 3.1
-      #   - renderer: zink on V3DV (Vulkan), because V3D's own GL driver
-      #     lacks desktop GL 4.3 and allows no vertex-stage storage buffers
-      #
-      # zink is selected for the v3d render node only, through a driconf
-      # file, so the display device keeps its native driver.
+      #   - renderer: zink on V3DV (Vulkan), which ghostty-kms picks by
+      #     itself because V3D's own GL driver lacks desktop GL 4.3 (and
+      #     allows no vertex-stage storage buffers)
       ghostty-kms-rpi = let
         mesa =
           (pkgs.mesa.override {
@@ -351,21 +349,6 @@
             postFixup = lib.replaceStrings [" $opencl/lib/libRusticlOpenCL.so"] [""] o.postFixup;
           });
 
-        # Mesa's defaults plus: use zink for the v3d device (the render node).
-        drirc = pkgs.runCommand "ghostty-kms-rpi-drirc" {} ''
-          mkdir -p $out
-          cp ${mesa}/share/drirc.d/* $out/
-          cat > $out/99-ghostty-kms-rpi.conf <<'XML'
-          <?xml version="1.0" standalone="yes"?>
-          <driconf>
-            <device driver="loader" kernel_driver="v3d">
-              <application name="all">
-                <option name="dri_driver" value="zink"/>
-              </application>
-            </device>
-          </driconf>
-          XML
-        '';
       in
         pkgs.runCommand "ghostty-kms-rpi-${ghostty-kms.version}" {
           nativeBuildInputs = [pkgs.makeWrapper];
@@ -376,11 +359,7 @@
           makeWrapper ${ghostty-kms}/bin/ghostty $out/bin/ghostty \
             --set-default __EGL_VENDOR_LIBRARY_FILENAMES ${mesa}/share/glvnd/egl_vendor.d/50_mesa.json \
             --set-default GBM_BACKENDS_PATH ${mesa}/lib/gbm \
-            --set-default VK_DRIVER_FILES ${mesa}/share/vulkan/icd.d/broadcom_icd.aarch64.json \
-            --set-default DRIRC_CONFIGDIR ${drirc} \
-            --set-default GHOSTTY_KMS_RENDER_DEVICE /dev/dri/renderD128 \
-            --set-default MESA_GL_VERSION_OVERRIDE 4.3 \
-            --set-default MESA_GLSL_VERSION_OVERRIDE 430
+            --set-default VK_DRIVER_FILES ${mesa}/share/vulkan/icd.d/broadcom_icd.aarch64.json
           ln -s ${ghostty-kms}/share $out/share
         '';
 

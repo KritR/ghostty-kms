@@ -45,10 +45,10 @@ input: Input,
 cursor: Cursor,
 
 /// The EGL display the renderer uses. Normally the presenter's (same
-/// GPU). With GHOSTTY_KMS_RENDER_DEVICE it's a separate GPU, for boards
-/// like the Jetson where rendering and scanout are different devices, or
-/// (`software`) Mesa's llvmpipe, for GPUs without desktop GL 4.3 such as
-/// the Raspberry Pi's V3D, which still does the presenter's blit.
+/// GPU). With GHOSTTY_KMS_RENDER_DEVICE it's another device, for boards
+/// like the Jetson where rendering and scanout are different devices. If
+/// the native driver can't do desktop GL 4.3 (e.g. the Raspberry Pi's V3D),
+/// it's the GPU's render node through zink (GL on the Vulkan driver).
 render_display: *egl.Display,
 render_node: ?RenderNode = null,
 
@@ -157,18 +157,13 @@ pub fn init(
         self.presenter.eglDisplay().terminate();
     }
 
-    self.render_display = self.presenter.eglDisplay();
-    if (util.env("GHOSTTY_KMS_RENDER_DEVICE")) |path| {
-        self.render_node = try openRenderNode(path);
-        self.render_display = self.render_node.?.display;
-    }
-    errdefer if (self.render_node) |rn| closeRenderNode(rn);
-
     // Refuse to run on a software rasterizer unless asked to. llvmpipe at
     // high resolutions keeps every core busy, which is a lot of power and
     // heat for small boards, and it's never what you want by accident.
     try checkNotSoftware("presenter", self.presenter.eglDisplay());
-    if (self.render_node != null) try checkNotSoftware("renderer", self.render_display);
+
+    try self.initRenderDisplay();
+    errdefer if (self.render_node) |rn| closeRenderNode(rn);
 
     try self.input.init(alloc, self, &self.seat, self.drm.width(), self.drm.height());
     errdefer self.input.deinit();
@@ -510,16 +505,108 @@ pub fn scroll(self: *App, dx: f64, dy: f64, mods: inputpkg.ScrollMods) void {
 //-------------------------------------------------------------------
 // Separate render GPU
 
-fn openRenderNode(path: [:0]const u8) !RenderNode {
-    if (std.mem.eql(u8, path, "software")) {
-        // Asking for the software device is asking for software rendering.
-        if (!util.envBool("GHOSTTY_KMS_ALLOW_SOFTWARE")) {
-            log.err("GHOSTTY_KMS_RENDER_DEVICE=software needs GHOSTTY_KMS_ALLOW_SOFTWARE=1", .{});
-            return error.SoftwareRenderingRefused;
-        }
-        return openSoftwareDevice();
+/// Pick the renderer's EGL display: the presenter's (or
+/// GHOSTTY_KMS_RENDER_DEVICE's) native driver if it can run Ghostty, else
+/// zink on the GPU's render node.
+fn initRenderDisplay(self: *App) !void {
+    self.render_display = self.presenter.eglDisplay();
+    const explicit = util.env("GHOSTTY_KMS_RENDER_DEVICE");
+    if (explicit) |path| {
+        self.render_node = try openRenderNode(path);
+        self.render_display = self.render_node.?.display;
     }
 
+    if (supportsGl43(self.render_display)) {
+        if (self.render_node != null) try checkNotSoftware("renderer", self.render_display);
+        return;
+    }
+
+    // Not enough GL natively. zink runs desktop GL on the Vulkan driver;
+    // it needs a render node (the display device may not be the GPU).
+    log.info("native driver lacks desktop OpenGL 4.3; trying zink", .{});
+    var path_buf: [64]u8 = undefined;
+    const node_path: [:0]const u8 = explicit orelse renderNodePath(self.drm.fd(), &path_buf) orelse {
+        log.err("no render node for zink; set GHOSTTY_KMS_RENDER_DEVICE", .{});
+        return error.NoGl43Renderer;
+    };
+    if (self.render_node) |rn| closeRenderNode(rn);
+    self.render_node = null;
+    self.render_display = self.presenter.eglDisplay();
+
+    const zink = try openZinkNode(node_path);
+    errdefer closeRenderNode(zink);
+    const driver = eglDriverName(zink.display) orelse "";
+    if (!std.mem.eql(u8, driver, "zink") or !supportsGl43(zink.display)) {
+        log.err("zink isn't available on {s} (got driver \"{s}\"); no renderer " ++
+            "with desktop OpenGL 4.3. zink needs Mesa built with zink and a " ++
+            "Vulkan driver for the GPU.", .{ node_path, driver });
+        return error.NoGl43Renderer;
+    }
+    log.info("renderer EGL driver=zink on {s}", .{node_path});
+    self.render_node = zink;
+    self.render_display = zink.display;
+}
+
+/// Whether a desktop OpenGL 4.3 core context can be created on `display`
+/// (what Ghostty's renderer asks for).
+fn supportsGl43(display: *egl.Display) bool {
+    const config = egl.Config.choose(display, &.{
+        egl.c.EGL_SURFACE_TYPE,    0,
+        egl.c.EGL_RENDERABLE_TYPE, egl.c.EGL_OPENGL_BIT,
+        egl.c.EGL_RED_SIZE,        8,
+        egl.c.EGL_GREEN_SIZE,      8,
+        egl.c.EGL_BLUE_SIZE,       8,
+        egl.c.EGL_ALPHA_SIZE,      8,
+    }) catch return false;
+    egl.bindApi(egl.c.EGL_OPENGL_API) catch return false;
+    const ctx = egl.Context.create(display, config, null, &.{
+        egl.c.EGL_CONTEXT_MAJOR_VERSION,       4,
+        egl.c.EGL_CONTEXT_MINOR_VERSION,       3,
+        egl.c.EGL_CONTEXT_OPENGL_PROFILE_MASK, egl.c.EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
+    }) catch return false;
+    ctx.destroy(display) catch {};
+    return true;
+}
+
+/// The render node to use for zink: the scanout device's own if it has
+/// one, else the first render node (on the Pi, the display controller
+/// (vc4) and the GPU (v3d) are separate devices).
+fn renderNodePath(drm_fd: c_int, buf: []u8) ?[:0]const u8 {
+    if (c.drmGetRenderDeviceNameFromFd(drm_fd)) |name| {
+        defer c.free(name);
+        return std.fmt.bufPrintZ(buf, "{s}", .{std.mem.span(name)}) catch null;
+    }
+    var i: usize = 128;
+    while (i < 192) : (i += 1) {
+        const path = std.fmt.bufPrintZ(buf, "/dev/dri/renderD{d}", .{i}) catch return null;
+        if (c.access(path.ptr, c.F_OK) == 0) return path;
+    }
+    return null;
+}
+
+/// Open `path` with Mesa's loader forced to zink, for this display only.
+/// zink on GPUs without tessellation shaders (like V3D) reports less than
+/// GL 4.3, though Ghostty doesn't use them, so the version is raised for it.
+fn openZinkNode(path: [:0]const u8) !RenderNode {
+    const overrides = [_]struct { [:0]const u8, [:0]const u8 }{
+        .{ "MESA_LOADER_DRIVER_OVERRIDE", "zink" },
+        .{ "MESA_GL_VERSION_OVERRIDE", "4.3" },
+        .{ "MESA_GLSL_VERSION_OVERRIDE", "430" },
+    };
+    // Mesa reads these when the display and its contexts are created; the
+    // presenter's display is already up and GLES contexts ignore the GL
+    // version. The loader override is cleared again right after.
+    const loader_was_set = c.getenv("MESA_LOADER_DRIVER_OVERRIDE") != null;
+    for (overrides) |o| {
+        if (c.getenv(o[0].ptr) == null) _ = c.setenv(o[0].ptr, o[1].ptr, 0);
+    }
+    defer if (!loader_was_set) {
+        _ = c.unsetenv("MESA_LOADER_DRIVER_OVERRIDE");
+    };
+    return openRenderNode(path);
+}
+
+fn openRenderNode(path: [:0]const u8) !RenderNode {
     // Render nodes don't need DRM master, so no seat involvement.
     const fd = c.open(path.ptr, c.O_RDWR | c.O_CLOEXEC);
     if (fd < 0) {
@@ -565,36 +652,6 @@ fn checkNotSoftware(what: []const u8, display: *egl.Display) !void {
     return error.SoftwareRenderingRefused;
 }
 
-/// Mesa's software EGL device (llvmpipe), found through
-/// EGL_EXT_device_enumeration. Chosen explicitly rather than through
-/// LIBGL_ALWAYS_SOFTWARE, which would also affect the presenter's display
-/// (and which Mesa's GBM platform doesn't honour anyway).
-fn openSoftwareDevice() !RenderNode {
-    const EGL_EXTENSIONS = 0x3055;
-    const EGL_PLATFORM_DEVICE_EXT = 0x313F;
-    const QueryDevices = *const fn (egl.c.EGLint, [*]?*anyopaque, *egl.c.EGLint) callconv(.c) egl.c.EGLBoolean;
-    const QueryDeviceString = *const fn (?*anyopaque, egl.c.EGLint) callconv(.c) ?[*:0]const u8;
-
-    const query_devices: QueryDevices = @ptrCast(egl.c.eglGetProcAddress("eglQueryDevicesEXT") orelse {
-        log.err("EGL_EXT_device_enumeration not available; can't find a software renderer", .{});
-        return error.NoSoftwareDevice;
-    });
-    const query_string: QueryDeviceString = @ptrCast(egl.c.eglGetProcAddress("eglQueryDeviceStringEXT") orelse
-        return error.NoSoftwareDevice);
-
-    var devices: [16]?*anyopaque = @splat(null);
-    var n: egl.c.EGLint = 0;
-    if (query_devices(devices.len, &devices, &n) != egl.c.EGL_TRUE) return error.NoSoftwareDevice;
-    for (devices[0..@intCast(n)]) |dev| {
-        const exts = std.mem.span(query_string(dev, EGL_EXTENSIONS) orelse continue);
-        if (!egl.hasExtension(exts, "EGL_MESA_device_software")) continue;
-        const display = try egl.Display.initPlatform(EGL_PLATFORM_DEVICE_EXT, @ptrCast(dev), null);
-        log.info("rendering on the software EGL device (llvmpipe)", .{});
-        return .{ .display = display };
-    }
-    log.err("no software EGL device found (is Mesa's llvmpipe installed?)", .{});
-    return error.NoSoftwareDevice;
-}
 
 //-------------------------------------------------------------------
 // Signals

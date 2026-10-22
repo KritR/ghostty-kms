@@ -42,9 +42,9 @@ patch Ghostty's config parser:
 | `GHOSTTY_KMS_CONNECTOR` | Output to use, e.g. `HDMI-A-1`, `DP-2`, `eDP-1`. Default: the first connected one. |
 | `GHOSTTY_KMS_MODE` | `WIDTHxHEIGHT` or `WIDTHxHEIGHT@HZ`. Default: the display's preferred mode. |
 | `GHOSTTY_KMS_SCALE` | Content scale (e.g. `2`). Default: from the display's physical size (DPI / 96, rounded to 0.25). |
-| `GHOSTTY_KMS_RENDER_DEVICE` | Render on a different device than the one scanning out, e.g. `/dev/dri/renderD128` (Jetson, Raspberry Pi), or `software` for Mesa's llvmpipe (needs `GHOSTTY_KMS_ALLOW_SOFTWARE=1`). |
-| `GHOSTTY_KMS_ALLOW_SOFTWARE=1` | Allow running on a software rasterizer. Off by default. |
-| `GHOSTTY_KMS_PRESENT=cpu` | Skip DMABUF sharing and copy frames through the CPU. Automatic if the import fails. |
+| `GHOSTTY_KMS_RENDER_DEVICE` | Render on a different device than the one scanning out, e.g. `/dev/dri/renderD128` (Jetson). Also the device zink uses, if needed. |
+| `GHOSTTY_KMS_ALLOW_SOFTWARE=1` | Allow running on a software rasterizer (llvmpipe). Off by default; only meant for VMs without a GPU, like the QEMU tests. |
+| `GHOSTTY_KMS_PRESENT=cpu` | Skip DMABUF sharing and copy rendered frames through memory (they're still rendered on the GPU). Automatic if the import fails. |
 | `GHOSTTY_KMS_FLIP_Y=1` | Flip the image vertically, for a driver that gets orientation wrong. |
 | `GHOSTTY_KMS_REPEAT_DELAY` / `GHOSTTY_KMS_REPEAT_RATE` | Key repeat delay (ms, default 400) and rate (Hz, default 25). |
 | `GHOSTTY_KMS_SEAT_TIMEOUT` | How long to wait for the seat to become active (ms, default 10000). |
@@ -166,29 +166,31 @@ with the repo shared: `scripts/vm-build.sh` wraps that). It uses
 upstream's dev shell and its pre-fetched Zig dependency cache, so it needs
 no network. The binary lands in `upstream/zig-out/bin/ghostty`.
 
+### GPUs without desktop OpenGL 4.3 (zink)
+
+Ghostty's renderer needs desktop OpenGL 4.3. At startup ghostty-kms tries
+that on the GPU's own driver; if it isn't available (e.g. the Raspberry
+Pi's V3D, which only does GLES 3.1), it renders through zink instead:
+Mesa's OpenGL on top of the GPU's Vulkan driver, on the GPU's render node.
+The final blit and scanout stay on the native driver. Nothing changes on
+GPUs that do GL 4.3 (Intel, AMD, NVIDIA). zink needs a Mesa built with
+zink and a Vulkan driver for the GPU.
+
+There's no software fallback: if neither works, ghostty-kms exits with an
+error rather than rendering on the CPU (llvmpipe keeps every core busy and
+browned out a Pi 5). `GHOSTTY_KMS_ALLOW_SOFTWARE=1` allows a software
+rasterizer explicitly, for VMs without a GPU.
+
 ### Raspberry Pi
 
 `ghostty-kms-rpi` (aarch64) is for Pis without GPU drivers installed
-(`hardware.graphics` off). It bundles a Mesa with only the Pi's drivers
-and no software rasterizer:
-
-- presenter (blit + scanout): the native vc4/V3D driver, OpenGL ES 3.1
-- renderer: zink, i.e. desktop OpenGL on the V3DV Vulkan driver, on
-  `/dev/dri/renderD128`. V3D's own GL driver can't run Ghostty: it lacks
-  desktop GL 4.3 and allows no storage buffers in vertex shaders. Zink is
-  selected for the v3d device only, via a driconf file, and GL 4.3 is
-  enabled with `MESA_GL_VERSION_OVERRIDE` (Ghostty doesn't use the
-  tessellation shaders V3D lacks).
+(`hardware.graphics` off). It bundles a Mesa with only the Pi's drivers:
+vc4/v3d, zink and the V3DV Vulkan driver, no software rasterizer, no LLVM
+(about 164 MiB). V3D can't run Ghostty natively (no desktop GL 4.3, and no
+storage buffers in vertex shaders), so it renders through zink as above.
 
 Run it from a VT login. Use a solid supply (the official 27 W one); the Pi 5
 logs undervoltage under load on weaker ones.
-
-### Software rendering
-
-ghostty-kms refuses to run on a software rasterizer (llvmpipe and friends)
-unless `GHOSTTY_KMS_ALLOW_SOFTWARE=1` is set, since that keeps every core
-busy. The NixOS module's `softwareRendering` option sets it, as does the
-QEMU test guest.
 
 ### No GTK
 

@@ -142,20 +142,25 @@ building it:
 - **The cursor plane** isn't touched while the seat is inactive (losing DRM
   master races the disable notification) and is re-applied after the
   modeset that follows re-enable.
-- **Raspberry Pi: zink, not llvmpipe.** V3D's GL driver can't run
-  Ghostty even with `MESA_GL_VERSION_OVERRIDE=4.3`: linking fails with "Too
-  many vertex shader storage blocks (1/0)". Zink on V3DV works, since Vulkan
-  requires storage buffers in every stage. `ghostty-kms-rpi` renders with
-  zink on the v3d render node (selected by a driconf
-  `<device driver="loader" kernel_driver="v3d">` entry with
-  `dri_driver=zink`, so the vc4 display device keeps its native driver) and
-  presents with native V3D. Its Mesa has no software rasterizer and no LLVM
-  (164 MiB). llvmpipe at 1440p browned out the Pi on a marginal supply,
-  which is why software rendering is now refused by default
-  (`GHOSTTY_KMS_ALLOW_SOFTWARE=1`; checked with `eglGetDisplayDriverName`).
-  `MESA_LOADER_DRIVER_OVERRIDE=zink` doesn't work: it applies to every
-  display, zink fails on the vc4 device, and Mesa silently falls back to
-  software. `GHOSTTY_KMS_RENDER_DEVICE=software` still exists for llvmpipe.
+- **zink when the native driver can't do GL 4.3, no software fallback.**
+  At startup `App.initRenderDisplay` tries a GL 4.3 core context on the
+  native driver; if that fails it opens the GPU's render node
+  (`drmGetRenderDeviceNameFromFd`, else the first `renderD*`) with
+  `MESA_LOADER_DRIVER_OVERRIDE=zink` set only while that display is
+  created, plus `MESA_GL_VERSION_OVERRIDE=4.3`/`MESA_GLSL_VERSION_OVERRIDE=430`
+  (zink on GPUs without tessellation, like V3D, reports less than 4.3;
+  Ghostty doesn't use tessellation, and the presenter's GLES context
+  ignores the GL override). On the Pi: V3D's GL driver fails ("Too many
+  vertex shader storage blocks (1/0)" even with the version override),
+  zink on V3DV works because Vulkan requires storage buffers in every
+  stage. Software rasterizers are refused (`eglGetDisplayDriverName` is
+  `swrast`/`kms_swrast`) unless `GHOSTTY_KMS_ALLOW_SOFTWARE=1`, which only
+  the QEMU tests set: llvmpipe at 1440p browned out a Pi 5. The earlier
+  `GHOSTTY_KMS_RENDER_DEVICE=software` (llvmpipe) option was removed.
+  `ghostty-kms-rpi` bundles Mesa with only vc4/v3d/zink + V3DV (no LLVM,
+  164 MiB). A global `MESA_LOADER_DRIVER_OVERRIDE=zink` doesn't work: it
+  hits the vc4 display device too, zink fails there, and Mesa silently
+  falls back to software.
 - **Login console** (`programs.ghostty-kms.console` in `nix/module.nix`):
   per-VT `autovt@ttyN` units (an exact instance file beats the
   autovt@ = getty@ template, so other VTs keep getty), `login` as the
@@ -259,8 +264,8 @@ Status as of 2026-10-13: 1-7 done and verified end to end in QEMU
 (`tests/qemu/e2e.sh`, 19 checks, passing on aarch64 and x86_64 guests on
 virtio-gpu + llvmpipe, i.e. the CPU frame path). 9 mostly: on a Pi 5
 (`ghostty-kms-rpi`, 2026-10-22) it runs at 2560x1440@144 with the renderer
-on zink/V3DV and the presenter on V3D, ~1% CPU idle; the Pi 5 needs a solid
-supply. Not yet done:
+on zink/V3DV (picked automatically) and the presenter on V3D, ~1% CPU idle;
+the Pi 5 needs a solid supply. Not yet done:
 input/VT checks on the Pi, real Intel/AMD hardware, and 8 (Jetson).
 
 1. Flake builds unmodified upstream Ghostty from a pinned rev.

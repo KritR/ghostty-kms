@@ -135,8 +135,10 @@ in {
       default = false;
       description = ''
         Render with Mesa's llvmpipe (LIBGL_ALWAYS_SOFTWARE=1) and allow it
-        (GHOSTTY_KMS_ALLOW_SOFTWARE=1). Meant for VMs without a GPU; it keeps
-        every core busy. Not for the Raspberry Pi: use `ghostty-kms-rpi`.
+        (GHOSTTY_KMS_ALLOW_SOFTWARE=1, otherwise ghostty-kms refuses software
+        rasterizers). Only for VMs without a GPU; it keeps every core busy.
+        GPUs without desktop GL 4.3 (e.g. the Raspberry Pi) use zink
+        automatically instead.
       '';
     };
 
