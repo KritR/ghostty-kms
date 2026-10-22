@@ -51,10 +51,20 @@ pub fn init(self: *Seat) !void {
     // The seat is not usable until it has been enabled at least once. If
     // our session never becomes active (e.g. we were started outside a
     // VT session) give up rather than hang.
+    // GHOSTTY_KMS_SEAT_TIMEOUT=0 waits forever, like getty on its VT
+    // (used by the console service).
     const timeout_ms: u64 = util.envInt(u64, "GHOSTTY_KMS_SEAT_TIMEOUT") orelse 10_000;
+    const forever = timeout_ms == 0;
     const deadline = util.nowNs() + timeout_ms * std.time.ns_per_ms;
     while (!self.active) {
         const now = util.nowNs();
+        if (forever) {
+            if (c.libseat_dispatch(self.seat, -1) < 0) {
+                log.err("libseat_dispatch failed while waiting for seat errno={}", .{util.errno()});
+                return error.SeatDispatchFailed;
+            }
+            continue;
+        }
         if (now >= deadline) {
             log.err("timed out waiting for the seat to become active; run " ++
                 "ghostty from a VT login (not over SSH or inside another " ++

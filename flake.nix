@@ -248,18 +248,31 @@
           };
       });
 
-    # NixOS guest for end-to-end tests under QEMU (see nix/test-vm.nix).
-    mkTestVm = system:
+    # Kernel, initrd and command line of a test guest, for tests/qemu/run.sh.
+    mkGuestFiles = pkgs: name: let
+      cfg = self.nixosConfigurations.${name}.config;
+    in
+      pkgs.runCommand "ghostty-kms-${name}" {} ''
+        mkdir -p $out
+        ln -s ${cfg.system.build.kernel}/${cfg.system.boot.loader.kernelFile} $out/kernel
+        ln -s ${cfg.system.build.netbootRamdisk}/initrd $out/initrd
+        echo "init=${cfg.system.build.toplevel}/init ${toString cfg.boot.kernelParams}" > $out/cmdline
+      '';
+
+    # NixOS guests for end-to-end tests under QEMU (see nix/test-vm*.nix).
+    mkTestVm = system: module:
       nixpkgs.lib.nixosSystem {
         inherit system;
-        modules = [self.nixosModules.default ./nix/test-vm.nix];
+        modules = [self.nixosModules.default module];
       };
   in {
     nixosModules.default = import ./nix/module.nix self;
 
     nixosConfigurations = {
-      test-vm-x86_64-linux = mkTestVm "x86_64-linux";
-      test-vm-aarch64-linux = mkTestVm "aarch64-linux";
+      test-vm-x86_64-linux = mkTestVm "x86_64-linux" ./nix/test-vm.nix;
+      test-vm-aarch64-linux = mkTestVm "aarch64-linux" ./nix/test-vm.nix;
+      test-vm-console-x86_64-linux = mkTestVm "x86_64-linux" ./nix/test-vm-console.nix;
+      test-vm-console-aarch64-linux = mkTestVm "aarch64-linux" ./nix/test-vm-console.nix;
     };
 
     packages = forSystems (system: pkgs: let
@@ -371,17 +384,9 @@
           ln -s ${ghostty-kms}/share $out/share
         '';
 
-      # Kernel, initrd and command line of the test guest, for
-      # tests/qemu/run.sh.
-      test-vm = let
-        cfg = self.nixosConfigurations."test-vm-${system}".config;
-      in
-        pkgs.runCommand "ghostty-kms-test-vm" {} ''
-          mkdir -p $out
-          ln -s ${cfg.system.build.kernel}/${cfg.system.boot.loader.kernelFile} $out/kernel
-          ln -s ${cfg.system.build.netbootRamdisk}/initrd $out/initrd
-          echo "init=${cfg.system.build.toplevel}/init ${toString cfg.boot.kernelParams}" > $out/cmdline
-        '';
+      # Test guests for tests/qemu/ (autologin session, and the console).
+      test-vm = mkGuestFiles pkgs "test-vm-${system}";
+      test-vm-console = mkGuestFiles pkgs "test-vm-console-${system}";
     });
 
     # Development shell: upstream's shell plus the kms system libraries, for

@@ -9,8 +9,8 @@
 #   uv run tests/qemu/qmp.py screenshot shot.png
 #   uv run tests/qemu/qmp.py type 'echo hello\n'
 #
-# Usage: run.sh [--system aarch64-linux|x86_64-linux] [--width W --height H]
-#               [--foreground]
+# Usage: run.sh [--system aarch64-linux|x86_64-linux] [--guest test-vm-console]
+#               [--width W --height H] [--foreground]
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 root="$(cd "$here/../.." && pwd)"
@@ -24,9 +24,11 @@ esac
 width=1280
 height=800
 foreground=0
+guest=test-vm
 while [ $# -gt 0 ]; do
   case "$1" in
     --system) system="$2"; shift 2 ;;
+    --guest) guest="$2"; shift 2 ;;
     --width) width="$2"; shift 2 ;;
     --height) height="$2"; shift 2 ;;
     --foreground) foreground=1; shift ;;
@@ -34,7 +36,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-out="$here/out/$system"
+out="$here/out/$system${guest#test-vm}"
 for f in kernel initrd cmdline; do
   [ -f "$out/$f" ] || { echo "missing $out/$f; run build-guest.sh first" >&2; exit 1; }
 done

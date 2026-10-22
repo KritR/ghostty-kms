@@ -53,6 +53,60 @@ patch Ghostty's config parser:
 Ghostty's log goes to stderr; redirect it to a file if you want to read it
 after exiting (`./result/bin/ghostty 2>/tmp/ghostty.log`).
 
+### As the login console (NixOS)
+
+The flake's NixOS module can make Ghostty the login console on chosen VTs,
+in place of getty: each VT shows a login prompt inside Ghostty, logging out
+gives a fresh one, and other VTs keep getty. To use it from another flake:
+
+```nix
+{
+  inputs.ghostty-raw-term.url = "git+ssh://...";  # wherever this repo lives
+
+  outputs = { nixpkgs, ghostty-raw-term, ... }: {
+    nixosConfigurations.my-host = nixpkgs.lib.nixosSystem {
+      modules = [
+        ghostty-raw-term.nixosModules.default
+        {
+          programs.ghostty-kms = {
+            enable = true;
+            console = {
+              enable = true;
+              ttys = ["tty2" "tty3"];  # default: tty2..tty6, tty1 stays getty
+              settings = { font-size = 13; theme = "Catppuccin Mocha"; };
+              environment.GHOSTTY_KMS_MODE = "1920x1080@60";  # optional
+            };
+          };
+        }
+      ];
+    };
+  };
+}
+```
+
+On a Raspberry Pi without system GPU drivers, also set
+`programs.ghostty-kms.package = ghostty-raw-term.packages.aarch64-linux.ghostty-kms-rpi;`
+and `hardware.graphics.enable = false;` (that package brings its own Mesa).
+
+How it fits together, for when something looks off:
+
+- Each VT is a systemd unit `autovt@ttyN.service`, which logind starts on
+  demand when you switch to the VT (tty1 at boot), exactly like getty. It
+  restarts when `login` exits (logout, or the 60 s login timeout).
+- Ghostty runs as root with no logind session of its own and takes the
+  display and input devices through libseat's built-in backend. `login` gets
+  `XDG_SEAT`/`XDG_VTNR`, so the user's session lands on the seat and VT like
+  a getty login: `loginctl` shows it as an active `user` session on `seat0`,
+  with `/run/user/<uid>` and user services.
+- If Ghostty fails to start 5 times within a minute on a VT (say, after a
+  broken GPU driver update), that VT gets a plain getty instead
+  (`fallbackToGetty`).
+- Logs: `journalctl -u autovt@tty2`.
+- Differences from getty: no `/etc/issue` banner, and each VT's Ghostty
+  holds its own GPU memory while it's running.
+
+Tested end to end by `tests/qemu/e2e-console.sh` (see below).
+
 ### Clipboard
 
 There's no system clipboard on the console, so the clipboard is
@@ -169,6 +223,11 @@ uv run tests/qemu/qmp.py screenshot shot.png
 is copied into the shared repo). `run.sh` works on macOS (HVF) and Linux
 (KVM). `qmp.py` can also type text, press key combos, move and click the
 mouse, and scroll; `tests/qemu/e2e.sh` runs a scripted check.
+
+`tests/qemu/e2e-console.sh` tests the console module instead, with a second
+guest (`build-guest.sh --guest test-vm-console`): login inside Ghostty,
+the user's seat session, VTs started on demand, a plain getty VT, the
+fallback to getty, and logging out.
 
 ### Updating upstream
 

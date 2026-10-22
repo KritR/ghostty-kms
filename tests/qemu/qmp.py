@@ -31,7 +31,8 @@ HERE = Path(__file__).resolve().parent
 SYSTEM = os.environ.get("GUEST_SYSTEM") or (
     "aarch64-linux" if os.uname().machine in ("arm64", "aarch64") else "x86_64-linux"
 )
-OUT = HERE / "out" / SYSTEM
+# GUEST_DIR selects another guest's output (e.g. out/aarch64-linux-console).
+OUT = Path(os.environ["GUEST_DIR"]) if os.environ.get("GUEST_DIR") else HERE / "out" / SYSTEM
 SCREEN_W = int(os.environ.get("GUEST_WIDTH", "1280"))
 SCREEN_H = int(os.environ.get("GUEST_HEIGHT", "800"))
 

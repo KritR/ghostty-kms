@@ -156,6 +156,18 @@ building it:
   `MESA_LOADER_DRIVER_OVERRIDE=zink` doesn't work: it applies to every
   display, zink fails on the vc4 device, and Mesa silently falls back to
   software. `GHOSTTY_KMS_RENDER_DEVICE=software` still exists for llvmpipe.
+- **Login console** (`programs.ghostty-kms.console` in `nix/module.nix`):
+  per-VT `autovt@ttyN` units (an exact instance file beats the
+  autovt@ = getty@ template, so other VTs keep getty), `login` as the
+  command, `Restart=always`, `OnFailure=getty@ttyN`. Ghostty must *not* hold
+  a logind session (no `PAMName`): logind refuses to create the user's
+  session for a process already in one, and refuses a second session on an
+  occupied VT. So it uses libseat's `builtin` backend as root, and `login`
+  runs as `login -p` under `env -i` with just TERM/locale/Ghostty's terminal
+  vars plus `XDG_SEAT`/`XDG_VTNR`, which pam_systemd uses to put the user's
+  session on the seat and VT (plain `login` wipes its environment first).
+  `GHOSTTY_KMS_SEAT_TIMEOUT=0` waits for the VT indefinitely, like getty.
+  nixpkgs' kmscon module has the session problem; this design avoids it.
 - **Seat acquisition times out** (10 s) with a clear error instead of hanging
   when started outside a VT session (e.g. over SSH).
 
