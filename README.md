@@ -84,9 +84,10 @@ gives a fresh one, and other VTs keep getty. To use it from another flake:
 }
 ```
 
-On a Raspberry Pi without system GPU drivers, also set
-`programs.ghostty-kms.package = ghostty-raw-term.packages.aarch64-linux.ghostty-kms-rpi;`
-and `hardware.graphics.enable = false;` (that package brings its own Mesa).
+The module enables `hardware.graphics` (GPU drivers in `/run/opengl-driver`).
+On a Raspberry Pi you can also set
+`hardware.graphics.package = ghostty-raw-term.packages.aarch64-linux.mesa-rpi;`,
+a much smaller Mesa with just the Pi's drivers (see below).
 
 How it fits together, for when something looks off:
 
@@ -140,12 +141,17 @@ program clipboard access that the config says to "ask" about is denied.
 ## Repository layout
 
 ```
-flake.nix          pins upstream Ghostty and overrides its package
-patches/           the patch series against upstream (build wiring only)
-apprt-kms/         the kms runtime, copied to src/apprt/kms at build time
-nix/test-vm.nix    NixOS guest for end-to-end tests
-tests/qemu/        QEMU runner and QMP driver for the test guest
-scripts/           development helpers
+flake.nix                pins upstream Ghostty, wires up the outputs
+patches/                 the patch series against upstream (build wiring only)
+apprt-kms/               the kms runtime, copied to src/apprt/kms at build time
+nix/ghostty-kms.nix      the package: upstream's, with the patches and slim inputs
+nix/slim-deps.nix        dependencies rebuilt without glib/X11/Wayland
+nix/zig-deps.nix         upstream's Zig dependency cache minus the GTK bindings
+nix/mesa-rpi.nix         Mesa trimmed to the Raspberry Pi's drivers
+nix/module.nix           the NixOS module (programs.ghostty-kms, the console)
+nix/test-vm*.nix         NixOS guests for the end-to-end tests
+tests/qemu/              QEMU runner, QMP driver and e2e scripts
+scripts/                 development helpers
 ```
 
 ## Development
@@ -183,11 +189,16 @@ rasterizer explicitly, for VMs without a GPU.
 
 ### Raspberry Pi
 
-`ghostty-kms-rpi` (aarch64) is for Pis without GPU drivers installed
-(`hardware.graphics` off). It bundles a Mesa with only the Pi's drivers:
-vc4/v3d, zink and the V3DV Vulkan driver, no software rasterizer, no LLVM
-(about 164 MiB). V3D can't run Ghostty natively (no desktop GL 4.3, and no
-storage buffers in vertex shaders), so it renders through zink as above.
+ghostty-kms needs the system's Mesa (`hardware.graphics.enable = true`, which
+the NixOS module sets). nixpkgs' default Mesa works; `mesa-rpi` (aarch64) is
+a much smaller one for `hardware.graphics.package`, with only the Pi's
+drivers: vc4/v3d, zink and the V3DV Vulkan driver, no software rasterizer,
+no LLVM. V3D can't run Ghostty natively (no desktop GL 4.3, and no storage
+buffers in vertex shaders), so ghostty-kms renders through zink as above.
+
+```nix
+hardware.graphics.package = ghostty-raw-term.packages.aarch64-linux.mesa-rpi;
+```
 
 Run it from a VT login. Use a solid supply (the official 27 W one); the Pi 5
 logs undervoltage under load on weaker ones.
@@ -248,4 +259,4 @@ fallback to getty, and logging out.
 | Intel/AMD + Mesa | Primary target. Builds; not yet run on real hardware (the DMABUF zero-copy path needs a real GPU to exercise). |
 | QEMU virtio-gpu + llvmpipe | `tests/qemu/e2e.sh` passes on aarch64 (HVF) and x86_64 (emulated). |
 | NVIDIA Jetson (JetPack 6) | Not yet tried. See CLAUDE.md "Hardware notes"; `GHOSTTY_KMS_RENDER_DEVICE` exists for the split render/display devices. |
-| Raspberry Pi 4/5 | Pi 5: `ghostty-kms-rpi` runs at 2560x1440@144 with the renderer on zink (V3DV) and the presenter on V3D, ~1% CPU idle. Input and VT switching not yet checked on the Pi. Pi 4 untried. |
+| Raspberry Pi 4/5 | Pi 5: ran at 2560x1440@144 with the renderer on zink (V3DV) and the presenter on V3D, ~1% CPU idle. Input and VT switching not yet checked on the Pi. Pi 4 untried. |

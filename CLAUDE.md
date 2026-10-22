@@ -157,8 +157,9 @@ building it:
   `swrast`/`kms_swrast`) unless `GHOSTTY_KMS_ALLOW_SOFTWARE=1`, which only
   the QEMU tests set: llvmpipe at 1440p browned out a Pi 5. The earlier
   `GHOSTTY_KMS_RENDER_DEVICE=software` (llvmpipe) option was removed.
-  `ghostty-kms-rpi` bundles Mesa with only vc4/v3d/zink + V3DV (no LLVM,
-  164 MiB). A global `MESA_LOADER_DRIVER_OVERRIDE=zink` doesn't work: it
+  Drivers come from the system's `hardware.graphics`; `mesa-rpi` is a Mesa
+  with only vc4/v3d/zink + V3DV (no LLVM, no software rasterizer) to use as
+  a Pi's `hardware.graphics.package`. A global `MESA_LOADER_DRIVER_OVERRIDE=zink` doesn't work: it
   hits the vc4 display device too, zink fails there, and Mesa silently
   falls back to software.
 - **Login console** (`programs.ghostty-kms.console` in `nix/module.nix`):
@@ -202,7 +203,7 @@ Rules:
 - **No new Zig package dependencies.** Upstream's Nix build pre-fetches Zig
   deps from `build.zig.zon.nix`; adding one means regenerating it. Link only C
   system libraries through pkg-config.
-- Upstream's package is built for GTK, so `mkKms` in `flake.nix` replaces
+- Upstream's package is built for GTK, so `nix/ghostty-kms.nix` replaces
   its input lists with whitelists instead of appending: no GTK4, libadwaita,
   glib/GObject introspection, GStreamer, X11, Wayland or wrapGAppsHook4. It
   also slims dependencies whose default nixpkgs builds link desktop libraries
@@ -250,7 +251,7 @@ Everything should just work. Do all initial development here.
   GL 4.3 requirement is not met.**
 - Plan was **llvmpipe** first. In practice it pegged all four cores and
   browned out a Pi 5; **zink on V3DV** (see Implementation notes) runs
-  Ghostty on the GPU instead and is what `ghostty-kms-rpi` uses.
+  Ghostty on the GPU instead; ghostty-kms picks it automatically.
 - Only if too slow: port the OpenGL backend to GLES 3.1 (GLSL ES shaders,
   `sampler2D` + `texelFetch` instead of `sampler2DRect`, move `bg_cells` into a
   texture if fragment-shader SSBOs aren't available). This is the one patch
@@ -263,7 +264,7 @@ Everything should just work. Do all initial development here.
 Status as of 2026-10-13: 1-7 done and verified end to end in QEMU
 (`tests/qemu/e2e.sh`, 19 checks, passing on aarch64 and x86_64 guests on
 virtio-gpu + llvmpipe, i.e. the CPU frame path). 9 mostly: on a Pi 5
-(`ghostty-kms-rpi`, 2026-10-22) it runs at 2560x1440@144 with the renderer
+(2026-10-22) it runs at 2560x1440@144 with the renderer
 on zink/V3DV (picked automatically) and the presenter on V3D, ~1% CPU idle;
 the Pi 5 needs a solid supply. Not yet done:
 input/VT checks on the Pi, real Intel/AMD hardware, and 8 (Jetson).

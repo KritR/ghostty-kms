@@ -137,6 +137,8 @@ pub fn init(
     installSignalHandlers(&self.wakeup_h);
     errdefer signal_wakeup = null;
 
+    setGlVersionOverride();
+
     try self.seat.init();
     errdefer self.seat.deinit();
 
@@ -516,14 +518,14 @@ fn initRenderDisplay(self: *App) !void {
         self.render_display = self.render_node.?.display;
     }
 
-    if (supportsGl43(self.render_display)) {
+    if (canRunGhostty(self.render_display)) {
         if (self.render_node != null) try checkNotSoftware("renderer", self.render_display);
         return;
     }
 
     // Not enough GL natively. zink runs desktop GL on the Vulkan driver;
     // it needs a render node (the display device may not be the GPU).
-    log.info("native driver lacks desktop OpenGL 4.3; trying zink", .{});
+    log.info("native driver can't run Ghostty's renderer; trying zink", .{});
     var path_buf: [64]u8 = undefined;
     const node_path: [:0]const u8 = explicit orelse renderNodePath(self.drm.fd(), &path_buf) orelse {
         log.err("no render node for zink; set GHOSTTY_KMS_RENDER_DEVICE", .{});
@@ -536,10 +538,14 @@ fn initRenderDisplay(self: *App) !void {
     const zink = try openZinkNode(node_path);
     errdefer closeRenderNode(zink);
     const driver = eglDriverName(zink.display) orelse "";
-    if (!std.mem.eql(u8, driver, "zink") or !supportsGl43(zink.display)) {
-        log.err("zink isn't available on {s} (got driver \"{s}\"); no renderer " ++
-            "with desktop OpenGL 4.3. zink needs Mesa built with zink and a " ++
-            "Vulkan driver for the GPU.", .{ node_path, driver });
+    if (!std.mem.eql(u8, driver, "zink")) {
+        log.err("zink isn't available on {s} (got driver \"{s}\"). It needs " ++
+            "Mesa built with zink and a Vulkan driver for the GPU.", .{ node_path, driver });
+        return error.NoGl43Renderer;
+    }
+    if (!canRunGhostty(zink.display)) {
+        log.err("zink on {s} can't run Ghostty's renderer either (needs " ++
+            "desktop OpenGL 4.3 with vertex shader storage buffers)", .{node_path});
         return error.NoGl43Renderer;
     }
     log.info("renderer EGL driver=zink on {s}", .{node_path});
@@ -547,9 +553,13 @@ fn initRenderDisplay(self: *App) !void {
     self.render_display = zink.display;
 }
 
-/// Whether a desktop OpenGL 4.3 core context can be created on `display`
-/// (what Ghostty's renderer asks for).
-fn supportsGl43(display: *egl.Display) bool {
+/// Whether Ghostty's renderer can run on `display`: a desktop OpenGL 4.3
+/// core context, with storage buffers in vertex shaders (V3D's GL driver,
+/// with the version override, does 4.3 contexts but allows none).
+fn canRunGhostty(display: *egl.Display) bool {
+    const GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS = 0x90D6;
+    const GetIntegerv = *const fn (u32, *i32) callconv(.c) void;
+
     const config = egl.Config.choose(display, &.{
         egl.c.EGL_SURFACE_TYPE,    0,
         egl.c.EGL_RENDERABLE_TYPE, egl.c.EGL_OPENGL_BIT,
@@ -564,8 +574,30 @@ fn supportsGl43(display: *egl.Display) bool {
         egl.c.EGL_CONTEXT_MINOR_VERSION,       3,
         egl.c.EGL_CONTEXT_OPENGL_PROFILE_MASK, egl.c.EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
     }) catch return false;
-    ctx.destroy(display) catch {};
+    defer ctx.destroy(display) catch {};
+
+    display.makeCurrent(null, null, ctx) catch return false;
+    defer display.releaseCurrent();
+    const get: GetIntegerv = @ptrCast(egl.c.eglGetProcAddress("glGetIntegerv") orelse return false);
+    var blocks: i32 = 0;
+    get(GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS, &blocks);
+    if (blocks < 1) {
+        log.info("driver allows {} vertex shader storage blocks; Ghostty needs 1", .{blocks});
+        return false;
+    }
     return true;
+}
+
+/// Mesa reads MESA_GL_VERSION_OVERRIDE once per process, at the first
+/// desktop GL context, so it has to be in place before any display is
+/// created. zink on GPUs without tessellation shaders (like V3D) reports
+/// less than GL 4.3 although Ghostty doesn't use them; elsewhere this just
+/// reports 4.3, which is what Ghostty asks for. GLES contexts (the
+/// presenter's) ignore it. Ghostty's own children don't inherit it: their
+/// environment was captured at startup.
+fn setGlVersionOverride() void {
+    _ = c.setenv("MESA_GL_VERSION_OVERRIDE", "4.3", 0);
+    _ = c.setenv("MESA_GLSL_VERSION_OVERRIDE", "430", 0);
 }
 
 /// The render node to use for zink: the scanout device's own if it has
@@ -585,22 +617,12 @@ fn renderNodePath(drm_fd: c_int, buf: []u8) ?[:0]const u8 {
 }
 
 /// Open `path` with Mesa's loader forced to zink, for this display only.
-/// zink on GPUs without tessellation shaders (like V3D) reports less than
-/// GL 4.3, though Ghostty doesn't use them, so the version is raised for it.
 fn openZinkNode(path: [:0]const u8) !RenderNode {
-    const overrides = [_]struct { [:0]const u8, [:0]const u8 }{
-        .{ "MESA_LOADER_DRIVER_OVERRIDE", "zink" },
-        .{ "MESA_GL_VERSION_OVERRIDE", "4.3" },
-        .{ "MESA_GLSL_VERSION_OVERRIDE", "430" },
-    };
-    // Mesa reads these when the display and its contexts are created; the
-    // presenter's display is already up and GLES contexts ignore the GL
-    // version. The loader override is cleared again right after.
-    const loader_was_set = c.getenv("MESA_LOADER_DRIVER_OVERRIDE") != null;
-    for (overrides) |o| {
-        if (c.getenv(o[0].ptr) == null) _ = c.setenv(o[0].ptr, o[1].ptr, 0);
-    }
-    defer if (!loader_was_set) {
+    // The loader reads this when the display is created; the presenter's
+    // display already exists, and it's cleared again right after.
+    const was_set = c.getenv("MESA_LOADER_DRIVER_OVERRIDE") != null;
+    if (!was_set) _ = c.setenv("MESA_LOADER_DRIVER_OVERRIDE", "zink", 1);
+    defer if (!was_set) {
         _ = c.unsetenv("MESA_LOADER_DRIVER_OVERRIDE");
     };
     return openRenderNode(path);

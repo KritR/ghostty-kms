@@ -10,9 +10,10 @@
 #     prompt timing out) gives a fresh one, like getty. Other VTs keep getty,
 #     and a VT falls back to getty if Ghostty keeps failing to start.
 #
-# On a Raspberry Pi without system GPU drivers, set
-# `package = ghostty-raw-term.packages.aarch64-linux.ghostty-kms-rpi` and
-# `hardware.graphics.enable = false` (that package brings its own Mesa).
+# GPU drivers come from the system (`hardware.graphics`, enabled by default
+# here). On a Raspberry Pi, `hardware.graphics.package =
+# ghostty-raw-term.packages.aarch64-linux.mesa-rpi` is a much smaller Mesa
+# with just the Pi's drivers; ghostty-kms renders through zink there.
 self: {
   config,
   lib,
@@ -124,10 +125,7 @@ in {
       type = lib.types.package;
       default = self.packages.${pkgs.stdenv.hostPlatform.system}.ghostty-kms;
       defaultText = lib.literalExpression "ghostty-raw-term.packages.\${system}.ghostty-kms";
-      description = ''
-        The ghostty-kms package. Use `ghostty-kms-rpi` on a Raspberry Pi
-        without system GPU drivers.
-      '';
+      description = "The ghostty-kms package.";
     };
 
     softwareRendering = lib.mkOption {
