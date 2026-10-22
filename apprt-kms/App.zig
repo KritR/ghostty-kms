@@ -46,7 +46,9 @@ cursor: Cursor,
 
 /// The EGL display the renderer uses. Normally the presenter's (same
 /// GPU). With GHOSTTY_KMS_RENDER_DEVICE it's a separate GPU, for boards
-/// like the Jetson where rendering and scanout are different devices.
+/// like the Jetson where rendering and scanout are different devices, or
+/// (`software`) Mesa's llvmpipe, for GPUs without desktop GL 4.3 such as
+/// the Raspberry Pi's V3D, which still does the presenter's blit.
 render_display: *egl.Display,
 render_node: ?RenderNode = null,
 
@@ -83,8 +85,9 @@ force_cpu: bool = false,
 content_scale: f32,
 
 const RenderNode = struct {
-    fd: c_int,
-    gbm: *c.struct_gbm_device,
+    /// Unset for the software device, which has no DRM node.
+    fd: c_int = -1,
+    gbm: ?*c.struct_gbm_device = null,
     display: *egl.Display,
 };
 
@@ -502,6 +505,8 @@ pub fn scroll(self: *App, dx: f64, dy: f64, mods: inputpkg.ScrollMods) void {
 // Separate render GPU
 
 fn openRenderNode(path: [:0]const u8) !RenderNode {
+    if (std.mem.eql(u8, path, "software")) return openSoftwareDevice();
+
     // Render nodes don't need DRM master, so no seat involvement.
     const fd = c.open(path.ptr, c.O_RDWR | c.O_CLOEXEC);
     if (fd < 0) {
@@ -518,8 +523,39 @@ fn openRenderNode(path: [:0]const u8) !RenderNode {
 
 fn closeRenderNode(rn: RenderNode) void {
     rn.display.terminate();
-    c.gbm_device_destroy(rn.gbm);
-    _ = c.close(rn.fd);
+    if (rn.gbm) |gbm| c.gbm_device_destroy(gbm);
+    if (rn.fd >= 0) _ = c.close(rn.fd);
+}
+
+/// Mesa's software EGL device (llvmpipe), found through
+/// EGL_EXT_device_enumeration. Chosen explicitly rather than through
+/// LIBGL_ALWAYS_SOFTWARE, which would also affect the presenter's display
+/// (and which Mesa's GBM platform doesn't honour anyway).
+fn openSoftwareDevice() !RenderNode {
+    const EGL_EXTENSIONS = 0x3055;
+    const EGL_PLATFORM_DEVICE_EXT = 0x313F;
+    const QueryDevices = *const fn (egl.c.EGLint, [*]?*anyopaque, *egl.c.EGLint) callconv(.c) egl.c.EGLBoolean;
+    const QueryDeviceString = *const fn (?*anyopaque, egl.c.EGLint) callconv(.c) ?[*:0]const u8;
+
+    const query_devices: QueryDevices = @ptrCast(egl.c.eglGetProcAddress("eglQueryDevicesEXT") orelse {
+        log.err("EGL_EXT_device_enumeration not available; can't find a software renderer", .{});
+        return error.NoSoftwareDevice;
+    });
+    const query_string: QueryDeviceString = @ptrCast(egl.c.eglGetProcAddress("eglQueryDeviceStringEXT") orelse
+        return error.NoSoftwareDevice);
+
+    var devices: [16]?*anyopaque = @splat(null);
+    var n: egl.c.EGLint = 0;
+    if (query_devices(devices.len, &devices, &n) != egl.c.EGL_TRUE) return error.NoSoftwareDevice;
+    for (devices[0..@intCast(n)]) |dev| {
+        const exts = std.mem.span(query_string(dev, EGL_EXTENSIONS) orelse continue);
+        if (!egl.hasExtension(exts, "EGL_MESA_device_software")) continue;
+        const display = try egl.Display.initPlatform(EGL_PLATFORM_DEVICE_EXT, @ptrCast(dev), null);
+        log.info("rendering on the software EGL device (llvmpipe)", .{});
+        return .{ .display = display };
+    }
+    log.err("no software EGL device found (is Mesa's llvmpipe installed?)", .{});
+    return error.NoSoftwareDevice;
 }
 
 //-------------------------------------------------------------------

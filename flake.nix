@@ -18,6 +18,104 @@
     systems = ["x86_64-linux" "aarch64-linux"];
     forSystems = f: lib.genAttrs systems (system: f system nixpkgs.legacyPackages.${system});
 
+    # Dependencies whose default nixpkgs builds link desktop libraries.
+    # Shared by ghostty-kms and the Mesa bundled into ghostty-kms-rpi.
+    slimFor = pkgs: rec {
+      # glib/gobject integration is only for GTK-style consumers.
+      harfbuzz = (pkgs.harfbuzz.override {withIntrospection = false;}).overrideAttrs (o: {
+        mesonFlags = o.mesonFlags ++ ["-Dglib=disabled" "-Dgobject=disabled" "-Ddocs=disabled" "-Dtests=disabled"];
+        nativeBuildInputs = lib.subtractLists [pkgs.glib pkgs.gtk-doc] o.nativeBuildInputs;
+        buildInputs = lib.remove pkgs.glib o.buildInputs;
+        doCheck = false;
+        outputs = lib.remove "devdoc" o.outputs;
+      });
+
+      # Compose tables (dead keys) and locale aliases are part of libX11's
+      # locale data. Generate them from the libX11 *source* the way its
+      # build does (nls/Makefile.am, cpprules.in), so no X11 binaries are
+      # fetched or built.
+      xlocale = pkgs.runCommandCC "xlocale-data" {inherit (pkgs.libx11) src;} ''
+        tar -xf $src
+        cd libX11-*/nls
+        magic() {
+          LC_CTYPE=C sed -e '/^#  *[0-9][0-9]*  *.*$/d' \
+            -e '/^#line  *[0-9][0-9]*  *.*$/d' \
+            -e '/^[	 ]*XCOMM$/s/XCOMM/#/' \
+            -e '/^[	 ]*XCOMM[^a-zA-Z0-9_]/s/XCOMM/#/' \
+            -e '/^[	 ]*XHASH/s/XHASH/#/' \
+            -e "s,X11_LOCALEDATADIR,$out,g" \
+            -e '/@@$/s/@@$/\\/' \
+            -e '/^$/d'
+        }
+        pp() { cpp -undef -traditional -DWCHAR32=1 < "$1" | magic; }
+        mkdir -p $out
+        for f in locale.alias compose.dir locale.dir; do
+          pp $f.pre > $f.l1
+          LC_CTYPE=C sed -e '/^[^#][^	 ]*:/s/://' -e '/^[^#].*[	 ].*:/d' < $f.l1 > $f.l2
+          cat $f.l2 $f.l1 > $out/$f
+        done
+        for d in */; do
+          d=''${d%/}
+          for f in Compose XLC_LOCALE; do
+            if [ -f $d/$f.pre ]; then
+              mkdir -p $out/$d
+              pp $d/$f.pre > $out/$d/$f
+            fi
+          done
+          if [ -f $d/XI18N_OBJS ]; then
+            mkdir -p $out/$d
+            cp $d/XI18N_OBJS $out/$d/
+          fi
+        done
+      '';
+
+      # No libxkbcommon-x11 (libxcb), Wayland tools, docs or the X11-based
+      # test suite (xvfb, setxkbmap, xkbcomp).
+      libxkbcommon = (pkgs.libxkbcommon.override {withWaylandTools = false;}).overrideAttrs (o: {
+        nativeBuildInputs = with pkgs.buildPackages; [meson ninja pkg-config bison];
+        buildInputs = [pkgs.xkeyboard_config pkgs.libxml2];
+        nativeCheckInputs = [];
+        doCheck = false;
+        outputs = lib.remove "doc" o.outputs;
+        mesonFlags =
+          (lib.filter (f: !(lib.any (p: lib.hasPrefix p f) ["-Dx-locale-root=" "-Denable-wayland=" "-Denable-docs="])) o.mesonFlags)
+          ++ [
+            "-Dx-locale-root=${xlocale}"
+            "-Denable-x11=false"
+            "-Denable-wayland=false"
+            "-Denable-docs=false"
+          ];
+      });
+
+      # Only libEGL and libGLESv2 are used (desktop GL entry points are
+      # resolved through eglGetProcAddress), so build without GLX/X11.
+      libglvnd = pkgs.libglvnd.overrideAttrs (o: {
+        buildInputs = [];
+        configureFlags = (o.configureFlags or []) ++ ["--disable-x11" "--disable-glx"];
+        postFixup = "";
+      });
+
+      # libdrm_intel is the only libdrm library that links libpciaccess,
+      # which drags in hwdata's 10 MiB PCI ID database. Nothing we load
+      # uses it (Mesa's Intel drivers don't either).
+      libdrm = pkgs.libdrm.override {withIntel = false;};
+
+      # The same gbm-only Mesa build as nixpkgs', against that libdrm.
+      # Upstream propagates libdrm, which leaves libdrm's -dev output in
+      # the runtime closure; we list libdrm in our own buildInputs instead.
+      libgbm = (pkgs.libgbm.override {inherit libdrm;}).overrideAttrs (o: {
+        propagatedBuildInputs = [];
+        buildInputs = (o.buildInputs or []) ++ [libdrm];
+      });
+
+      # libwacom (tablets) pulls in glib and libgudev; Lua plugins aren't
+      # needed for a terminal.
+      libinput = pkgs.libinput.override {
+        wacomSupport = false;
+        luaSupport = false;
+      };
+    };
+
     # Apply the kms runtime on top of one of upstream's package variants.
     #
     # Upstream's derivation is built for the GTK runtime: its inputs include
@@ -31,102 +129,7 @@
       # wayland-scanner/protocols) is dropped.
       keepNative = ["git" "ncurses" "pandoc-cli" "pkg-config-wrapper" "zig" "libxml2" "gettext"];
 
-      # Dependencies whose default nixpkgs builds link desktop libraries.
-      slim = rec {
-        # glib/gobject integration is only for GTK-style consumers.
-        harfbuzz = (pkgs.harfbuzz.override {withIntrospection = false;}).overrideAttrs (o: {
-          mesonFlags = o.mesonFlags ++ ["-Dglib=disabled" "-Dgobject=disabled" "-Ddocs=disabled" "-Dtests=disabled"];
-          nativeBuildInputs = lib.subtractLists [pkgs.glib pkgs.gtk-doc] o.nativeBuildInputs;
-          buildInputs = lib.remove pkgs.glib o.buildInputs;
-          doCheck = false;
-          outputs = lib.remove "devdoc" o.outputs;
-        });
-
-        # Compose tables (dead keys) and locale aliases are part of libX11's
-        # locale data. Generate them from the libX11 *source* the way its
-        # build does (nls/Makefile.am, cpprules.in), so no X11 binaries are
-        # fetched or built.
-        xlocale = pkgs.runCommandCC "xlocale-data" {inherit (pkgs.libx11) src;} ''
-          tar -xf $src
-          cd libX11-*/nls
-          magic() {
-            LC_CTYPE=C sed -e '/^#  *[0-9][0-9]*  *.*$/d' \
-              -e '/^#line  *[0-9][0-9]*  *.*$/d' \
-              -e '/^[	 ]*XCOMM$/s/XCOMM/#/' \
-              -e '/^[	 ]*XCOMM[^a-zA-Z0-9_]/s/XCOMM/#/' \
-              -e '/^[	 ]*XHASH/s/XHASH/#/' \
-              -e "s,X11_LOCALEDATADIR,$out,g" \
-              -e '/@@$/s/@@$/\\/' \
-              -e '/^$/d'
-          }
-          pp() { cpp -undef -traditional -DWCHAR32=1 < "$1" | magic; }
-          mkdir -p $out
-          for f in locale.alias compose.dir locale.dir; do
-            pp $f.pre > $f.l1
-            LC_CTYPE=C sed -e '/^[^#][^	 ]*:/s/://' -e '/^[^#].*[	 ].*:/d' < $f.l1 > $f.l2
-            cat $f.l2 $f.l1 > $out/$f
-          done
-          for d in */; do
-            d=''${d%/}
-            for f in Compose XLC_LOCALE; do
-              if [ -f $d/$f.pre ]; then
-                mkdir -p $out/$d
-                pp $d/$f.pre > $out/$d/$f
-              fi
-            done
-            if [ -f $d/XI18N_OBJS ]; then
-              mkdir -p $out/$d
-              cp $d/XI18N_OBJS $out/$d/
-            fi
-          done
-        '';
-
-        # No libxkbcommon-x11 (libxcb), Wayland tools, docs or the X11-based
-        # test suite (xvfb, setxkbmap, xkbcomp).
-        libxkbcommon = (pkgs.libxkbcommon.override {withWaylandTools = false;}).overrideAttrs (o: {
-          nativeBuildInputs = with pkgs.buildPackages; [meson ninja pkg-config bison];
-          buildInputs = [pkgs.xkeyboard_config pkgs.libxml2];
-          nativeCheckInputs = [];
-          doCheck = false;
-          outputs = lib.remove "doc" o.outputs;
-          mesonFlags =
-            (lib.filter (f: !(lib.any (p: lib.hasPrefix p f) ["-Dx-locale-root=" "-Denable-wayland=" "-Denable-docs="])) o.mesonFlags)
-            ++ [
-              "-Dx-locale-root=${xlocale}"
-              "-Denable-x11=false"
-              "-Denable-wayland=false"
-              "-Denable-docs=false"
-            ];
-        });
-
-        # Only libEGL and libGLESv2 are used (desktop GL entry points are
-        # resolved through eglGetProcAddress), so build without GLX/X11.
-        libglvnd = pkgs.libglvnd.overrideAttrs (o: {
-          buildInputs = [];
-          configureFlags = (o.configureFlags or []) ++ ["--disable-x11" "--disable-glx"];
-          postFixup = "";
-        });
-
-        # libdrm_intel is the only libdrm library that links libpciaccess,
-        # which drags in hwdata's 10 MiB PCI ID database. Nothing we load
-        # uses it (Mesa's Intel drivers don't either).
-        libdrm = pkgs.libdrm.override {withIntel = false;};
-
-        # The same gbm-only Mesa build as nixpkgs', against that libdrm.
-        # Upstream propagates libdrm, which leaves libdrm's -dev output in
-        # the runtime closure; we list libdrm in our own buildInputs instead.
-        libgbm = (pkgs.libgbm.override {inherit libdrm;}).overrideAttrs (o: {
-          propagatedBuildInputs = [];
-          buildInputs = (o.buildInputs or []) ++ [libdrm];
-        });
-
-        # libwacom (tablets) pulls in glib and libgudev; Lua plugins aren't
-        # needed for a terminal.
-        libinput = pkgs.libinput.override {
-          wacomSupport = false;
-          luaSupport = false;
-        };
-      };
+      slim = slimFor pkgs;
 
       # Upstream's offline Zig dependency cache, minus the GTK and Wayland
       # bindings. They're lazy dependencies that only the GTK runtime asks
@@ -274,6 +277,85 @@
       ghostty-kms-releasesafe = mkKms pkgs up.ghostty-releasesafe;
 
       default = ghostty-kms;
+
+      # Raspberry Pi variant for systems without GPU userspace drivers
+      # (hardware.graphics disabled, or not NixOS): bundles a Mesa trimmed
+      # to llvmpipe + the Pi's vc4 (display) and v3d (GPU) drivers, KMS only,
+      # and renders with llvmpipe by default since V3D lacks desktop GL 4.3
+      # (the presenter's blit and scanout still use the V3D GPU).
+      # Override any of the variables to use the system's drivers instead.
+      ghostty-kms-rpi = let
+        llvm = lib.getLib pkgs.mesa.llvmPackages.libllvm;
+
+        # llvmpipe only loads libLLVM.so, but Mesa's RUNPATH into LLVM's
+        # lib output keeps all of it (~350 MiB of static archives on top
+        # of the 177 MiB shared library). Ship just the shared library.
+        llvmShared = pkgs.runCommand "libllvm-shared-${pkgs.mesa.llvmPackages.libllvm.version}" {
+          nativeBuildInputs = [pkgs.patchelf pkgs.removeReferencesTo];
+        } ''
+          mkdir -p $out/lib
+          cp -P ${llvm}/lib/libLLVM*.so* $out/lib/
+          chmod -R u+w $out/lib
+          for f in $out/lib/*; do
+            [ -L "$f" ] && continue
+            rp=$(patchelf --print-rpath "$f")
+            patchelf --set-rpath "$(echo "$rp" | sed "s|${llvm}/lib|$out/lib|g")" "$f"
+            remove-references-to -t ${llvm} "$f"
+          done
+        '';
+
+        mesa =
+          (pkgs.mesa.override {
+            galliumDrivers = ["llvmpipe" "vc4" "v3d"];
+            vulkanDrivers = [];
+            vulkanLayers = [];
+            eglPlatforms = [];
+            withValgrind = false;
+            enablePatentEncumberedCodecs = false;
+            # The same libdrm/libgbm as ghostty-kms (no libdrm_intel, so no
+            # hwdata, and one copy of each).
+            inherit (slimFor pkgs) libdrm libgbm;
+          }).overrideAttrs (o: {
+            # nixpkgs builds with every auto feature on; without the X11
+            # platform these have to be off explicitly. The rest are for
+            # GPUs other than the Pi's.
+            mesonFlags =
+              (lib.filter (f: !(lib.any (p: lib.hasPrefix p f) ["-Dtools=" "-Dintel-rt=" "-Damdgpu-virtio=" "-Dfreedreno-kmds="])) o.mesonFlags)
+              ++ ["-Dxlib-lease=disabled" "-Dglx=disabled" "-Dtools=" "-Dintel-rt=disabled" "-Damdgpu-virtio=false" "-Dgallium-va=disabled"];
+            # Only populated by drivers we don't build (D3D12), but nixpkgs
+            # declares the output.
+            postInstall = (o.postInstall or "") + "\nmkdir -p $spirv2dxil\n";
+            # Point Mesa at the shared-library-only copy of LLVM.
+            nativeBuildInputs = o.nativeBuildInputs ++ [pkgs.removeReferencesTo];
+            postFixup =
+              (o.postFixup or "")
+              + ''
+                for f in $(find $out/lib -type f -name '*.so*'); do
+                  rp=$(patchelf --print-rpath "$f" 2>/dev/null) || continue
+                  case "$rp" in
+                    *${llvm}*)
+                      patchelf --set-rpath "$(echo "$rp" | sed "s|${llvm}/lib|${llvmShared}/lib|g")" "$f"
+                      # patchelf leaves the old RUNPATH string behind,
+                      # unused; scrub it so Nix doesn't keep LLVM's lib.
+                      remove-references-to -t ${llvm} "$f"
+                      ;;
+                  esac
+                done
+              '';
+          });
+      in
+        pkgs.runCommand "ghostty-kms-rpi-${ghostty-kms.version}" {
+          nativeBuildInputs = [pkgs.makeWrapper];
+          meta = ghostty-kms.meta // {platforms = ["aarch64-linux"];};
+          passthru = {inherit mesa;};
+        } ''
+          mkdir -p $out/bin
+          makeWrapper ${ghostty-kms}/bin/ghostty $out/bin/ghostty \
+            --set-default __EGL_VENDOR_LIBRARY_FILENAMES ${mesa}/share/glvnd/egl_vendor.d/50_mesa.json \
+            --set-default GBM_BACKENDS_PATH ${mesa}/lib/gbm \
+            --set-default GHOSTTY_KMS_RENDER_DEVICE software
+          ln -s ${ghostty-kms}/share $out/share
+        '';
 
       # Kernel, initrd and command line of the test guest, for
       # tests/qemu/run.sh.

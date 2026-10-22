@@ -42,7 +42,7 @@ patch Ghostty's config parser:
 | `GHOSTTY_KMS_CONNECTOR` | Output to use, e.g. `HDMI-A-1`, `DP-2`, `eDP-1`. Default: the first connected one. |
 | `GHOSTTY_KMS_MODE` | `WIDTHxHEIGHT` or `WIDTHxHEIGHT@HZ`. Default: the display's preferred mode. |
 | `GHOSTTY_KMS_SCALE` | Content scale (e.g. `2`). Default: from the display's physical size (DPI / 96, rounded to 0.25). |
-| `GHOSTTY_KMS_RENDER_DEVICE` | Render on a different GPU than the one scanning out, e.g. `/dev/dri/renderD128` (Jetson). |
+| `GHOSTTY_KMS_RENDER_DEVICE` | Render on a different GPU than the one scanning out, e.g. `/dev/dri/renderD128` (Jetson), or `software` for Mesa's llvmpipe while the GPU still does the final blit and scanout (Raspberry Pi). |
 | `GHOSTTY_KMS_PRESENT=cpu` | Skip DMABUF sharing and copy frames through the CPU. Automatic if the import fails. |
 | `GHOSTTY_KMS_FLIP_Y=1` | Flip the image vertically, for a driver that gets orientation wrong. |
 | `GHOSTTY_KMS_REPEAT_DELAY` / `GHOSTTY_KMS_REPEAT_RATE` | Key repeat delay (ms, default 400) and rate (Hz, default 25). |
@@ -111,6 +111,17 @@ with the repo shared: `scripts/vm-build.sh` wraps that). It uses
 upstream's dev shell and its pre-fetched Zig dependency cache, so it needs
 no network. The binary lands in `upstream/zig-out/bin/ghostty`.
 
+### Raspberry Pi
+
+`ghostty-kms-rpi` (aarch64) bundles a Mesa trimmed to llvmpipe + the
+Pi's vc4/v3d drivers, for Pis without GPU drivers installed
+(`hardware.graphics` off). It renders with llvmpipe
+(`GHOSTTY_KMS_RENDER_DEVICE=software`) since V3D lacks desktop GL 4.3, and
+presents with the V3D GPU. Run it from a VT login. On a Pi 5 use the
+official 27 W supply: llvmpipe at high resolutions can use all four cores
+and brown out weaker ones (`GHOSTTY_KMS_MODE=1920x1080@60` and
+`LP_NUM_THREADS=2` reduce the load).
+
 ### No GTK
 
 The package is built without GTK and its neighbours (glib/GObject,
@@ -162,4 +173,4 @@ mouse, and scroll; `tests/qemu/e2e.sh` runs a scripted check.
 | Intel/AMD + Mesa | Primary target. Builds; not yet run on real hardware (the DMABUF zero-copy path needs a real GPU to exercise). |
 | QEMU virtio-gpu + llvmpipe | `tests/qemu/e2e.sh` passes on aarch64 (HVF) and x86_64 (emulated). |
 | NVIDIA Jetson (JetPack 6) | Not yet tried. See CLAUDE.md "Hardware notes"; `GHOSTTY_KMS_RENDER_DEVICE` exists for the split render/display devices. |
-| Raspberry Pi 4/5 | Not yet tried. Plan is llvmpipe (`LIBGL_ALWAYS_SOFTWARE=1`) since V3D lacks GL 4.3. |
+| Raspberry Pi 4/5 | Pi 5 (NixOS, no system GPU drivers): `ghostty-kms-rpi` reached first frame at 2560x1440@144 with the renderer on llvmpipe and the blit on V3D. Needs a proper 27 W supply; ours browned out under llvmpipe load. Input, VT switching etc. not yet checked on the Pi. |

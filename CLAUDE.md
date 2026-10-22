@@ -142,6 +142,13 @@ building it:
 - **The cursor plane** isn't touched while the seat is inactive (losing DRM
   master races the disable notification) and is re-applied after the
   modeset that follows re-enable.
+- **Raspberry Pi split rendering:** `GHOSTTY_KMS_RENDER_DEVICE=software`
+  opens Mesa's software EGL device (`EGL_MESA_device_software` via
+  `EGL_EXT_device_enumeration`) for the renderer, while the presenter keeps
+  the scanout GPU (V3D). Mesa's GBM platform ignores `LIBGL_ALWAYS_SOFTWARE`,
+  so that variable can't do this. `ghostty-kms-rpi` bundles a Mesa with only
+  llvmpipe/vc4/v3d and a shared-library-only copy of LLVM (the full LLVM
+  lib output is ~530 MiB of mostly static archives).
 - **Seat acquisition times out** (10 s) with a clear error instead of hanging
   when started outside a VT session (e.g. over SSH).
 
@@ -230,9 +237,11 @@ Everything should just work. Do all initial development here.
 
 Status as of 2026-10-13: 1-7 done and verified end to end in QEMU
 (`tests/qemu/e2e.sh`, 19 checks, passing on aarch64 and x86_64 guests on
-virtio-gpu + llvmpipe, i.e. the CPU frame path). Not yet done: running on
-real Intel/AMD hardware (exercises the DMABUF path), and 8/9, which need
-the boards.
+virtio-gpu + llvmpipe, i.e. the CPU frame path). 9 partly: on a Pi 5
+(`ghostty-kms-rpi`, 2026-10-22) it reached first frame at 2560x1440@144,
+renderer on llvmpipe via the software EGL device and presenter on V3D,
+before the board browned out on an underpowered supply. Not yet done:
+input/VT checks on the Pi, real Intel/AMD hardware, and 8 (Jetson).
 
 1. Flake builds unmodified upstream Ghostty from a pinned rev.
 2. `kms` runtime compiles as a stub (empty apprt, build wiring patch).
