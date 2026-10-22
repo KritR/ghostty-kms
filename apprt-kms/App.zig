@@ -164,6 +164,12 @@ pub fn init(
     }
     errdefer if (self.render_node) |rn| closeRenderNode(rn);
 
+    // Refuse to run on a software rasterizer unless asked to. llvmpipe at
+    // high resolutions keeps every core busy, which is a lot of power and
+    // heat for small boards, and it's never what you want by accident.
+    try checkNotSoftware("presenter", self.presenter.eglDisplay());
+    if (self.render_node != null) try checkNotSoftware("renderer", self.render_display);
+
     try self.input.init(alloc, self, &self.seat, self.drm.width(), self.drm.height());
     errdefer self.input.deinit();
 
@@ -505,7 +511,14 @@ pub fn scroll(self: *App, dx: f64, dy: f64, mods: inputpkg.ScrollMods) void {
 // Separate render GPU
 
 fn openRenderNode(path: [:0]const u8) !RenderNode {
-    if (std.mem.eql(u8, path, "software")) return openSoftwareDevice();
+    if (std.mem.eql(u8, path, "software")) {
+        // Asking for the software device is asking for software rendering.
+        if (!util.envBool("GHOSTTY_KMS_ALLOW_SOFTWARE")) {
+            log.err("GHOSTTY_KMS_RENDER_DEVICE=software needs GHOSTTY_KMS_ALLOW_SOFTWARE=1", .{});
+            return error.SoftwareRenderingRefused;
+        }
+        return openSoftwareDevice();
+    }
 
     // Render nodes don't need DRM master, so no seat involvement.
     const fd = c.open(path.ptr, c.O_RDWR | c.O_CLOEXEC);
@@ -525,6 +538,31 @@ fn closeRenderNode(rn: RenderNode) void {
     rn.display.terminate();
     if (rn.gbm) |gbm| c.gbm_device_destroy(gbm);
     if (rn.fd >= 0) _ = c.close(rn.fd);
+}
+
+/// The Mesa driver behind an EGL display (EGL_MESA_query_driver), e.g.
+/// "v3d", "zink", "iris", or "swrast"/"kms_swrast" for software.
+fn eglDriverName(display: *egl.Display) ?[:0]const u8 {
+    const GetDriverName = *const fn (egl.c.EGLDisplay) callconv(.c) ?[*:0]const u8;
+    const f: GetDriverName = @ptrCast(egl.c.eglGetProcAddress("eglGetDisplayDriverName") orelse return null);
+    return std.mem.span(f(display) orelse return null);
+}
+
+fn checkNotSoftware(what: []const u8, display: *egl.Display) !void {
+    const name = eglDriverName(display) orelse {
+        log.info("{s} EGL driver unknown (no EGL_MESA_query_driver)", .{what});
+        return;
+    };
+    log.info("{s} EGL driver={s}", .{ what, name });
+    const software = std.mem.eql(u8, name, "swrast") or std.mem.eql(u8, name, "kms_swrast");
+    if (!software) return;
+    if (util.envBool("GHOSTTY_KMS_ALLOW_SOFTWARE")) {
+        log.warn("{s} is using software rendering ({s}); allowed by GHOSTTY_KMS_ALLOW_SOFTWARE", .{ what, name });
+        return;
+    }
+    log.err("{s} would use software rendering ({s}); refusing. Set " ++
+        "GHOSTTY_KMS_ALLOW_SOFTWARE=1 to allow it.", .{ what, name });
+    return error.SoftwareRenderingRefused;
 }
 
 /// Mesa's software EGL device (llvmpipe), found through

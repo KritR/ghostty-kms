@@ -34,6 +34,8 @@ in {
     hardware.graphics.enable = true;
     environment.sessionVariables = lib.mkIf cfg.softwareRendering {
       LIBGL_ALWAYS_SOFTWARE = "1";
+      # ghostty-kms refuses software rasterizers unless told otherwise.
+      GHOSTTY_KMS_ALLOW_SOFTWARE = "1";
     };
   };
 }

@@ -142,13 +142,20 @@ building it:
 - **The cursor plane** isn't touched while the seat is inactive (losing DRM
   master races the disable notification) and is re-applied after the
   modeset that follows re-enable.
-- **Raspberry Pi split rendering:** `GHOSTTY_KMS_RENDER_DEVICE=software`
-  opens Mesa's software EGL device (`EGL_MESA_device_software` via
-  `EGL_EXT_device_enumeration`) for the renderer, while the presenter keeps
-  the scanout GPU (V3D). Mesa's GBM platform ignores `LIBGL_ALWAYS_SOFTWARE`,
-  so that variable can't do this. `ghostty-kms-rpi` bundles a Mesa with only
-  llvmpipe/vc4/v3d and a shared-library-only copy of LLVM (the full LLVM
-  lib output is ~530 MiB of mostly static archives).
+- **Raspberry Pi: zink, not llvmpipe.** V3D's GL driver can't run
+  Ghostty even with `MESA_GL_VERSION_OVERRIDE=4.3`: linking fails with "Too
+  many vertex shader storage blocks (1/0)". Zink on V3DV works, since Vulkan
+  requires storage buffers in every stage. `ghostty-kms-rpi` renders with
+  zink on the v3d render node (selected by a driconf
+  `<device driver="loader" kernel_driver="v3d">` entry with
+  `dri_driver=zink`, so the vc4 display device keeps its native driver) and
+  presents with native V3D. Its Mesa has no software rasterizer and no LLVM
+  (164 MiB). llvmpipe at 1440p browned out the Pi on a marginal supply,
+  which is why software rendering is now refused by default
+  (`GHOSTTY_KMS_ALLOW_SOFTWARE=1`; checked with `eglGetDisplayDriverName`).
+  `MESA_LOADER_DRIVER_OVERRIDE=zink` doesn't work: it applies to every
+  display, zink fails on the vc4 device, and Mesa silently falls back to
+  software. `GHOSTTY_KMS_RENDER_DEVICE=software` still exists for llvmpipe.
 - **Seat acquisition times out** (10 s) with a clear error instead of hanging
   when started outside a VT session (e.g. over SSH).
 
@@ -224,8 +231,9 @@ Everything should just work. Do all initial development here.
 
 - Mesa's V3D driver provides GLES 3.1 and desktop GL 3.1 at most. **Ghostty's
   GL 4.3 requirement is not met.**
-- Plan: run on **llvmpipe** (Mesa software GL 4.5) first, using the CPU frame
-  path. Likely usable on a Pi 5, possibly sluggish on a Pi 4.
+- Plan was **llvmpipe** first. In practice it pegged all four cores and
+  browned out a Pi 5; **zink on V3DV** (see Implementation notes) runs
+  Ghostty on the GPU instead and is what `ghostty-kms-rpi` uses.
 - Only if too slow: port the OpenGL backend to GLES 3.1 (GLSL ES shaders,
   `sampler2D` + `texelFetch` instead of `sampler2DRect`, move `bg_cells` into a
   texture if fragment-shader SSBOs aren't available). This is the one patch
@@ -237,10 +245,10 @@ Everything should just work. Do all initial development here.
 
 Status as of 2026-10-13: 1-7 done and verified end to end in QEMU
 (`tests/qemu/e2e.sh`, 19 checks, passing on aarch64 and x86_64 guests on
-virtio-gpu + llvmpipe, i.e. the CPU frame path). 9 partly: on a Pi 5
-(`ghostty-kms-rpi`, 2026-10-22) it reached first frame at 2560x1440@144,
-renderer on llvmpipe via the software EGL device and presenter on V3D,
-before the board browned out on an underpowered supply. Not yet done:
+virtio-gpu + llvmpipe, i.e. the CPU frame path). 9 mostly: on a Pi 5
+(`ghostty-kms-rpi`, 2026-10-22) it runs at 2560x1440@144 with the renderer
+on zink/V3DV and the presenter on V3D, ~1% CPU idle; the Pi 5 needs a solid
+supply. Not yet done:
 input/VT checks on the Pi, real Intel/AMD hardware, and 8 (Jetson).
 
 1. Flake builds unmodified upstream Ghostty from a pinned rev.

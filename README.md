@@ -42,7 +42,8 @@ patch Ghostty's config parser:
 | `GHOSTTY_KMS_CONNECTOR` | Output to use, e.g. `HDMI-A-1`, `DP-2`, `eDP-1`. Default: the first connected one. |
 | `GHOSTTY_KMS_MODE` | `WIDTHxHEIGHT` or `WIDTHxHEIGHT@HZ`. Default: the display's preferred mode. |
 | `GHOSTTY_KMS_SCALE` | Content scale (e.g. `2`). Default: from the display's physical size (DPI / 96, rounded to 0.25). |
-| `GHOSTTY_KMS_RENDER_DEVICE` | Render on a different GPU than the one scanning out, e.g. `/dev/dri/renderD128` (Jetson), or `software` for Mesa's llvmpipe while the GPU still does the final blit and scanout (Raspberry Pi). |
+| `GHOSTTY_KMS_RENDER_DEVICE` | Render on a different device than the one scanning out, e.g. `/dev/dri/renderD128` (Jetson, Raspberry Pi), or `software` for Mesa's llvmpipe (needs `GHOSTTY_KMS_ALLOW_SOFTWARE=1`). |
+| `GHOSTTY_KMS_ALLOW_SOFTWARE=1` | Allow running on a software rasterizer. Off by default. |
 | `GHOSTTY_KMS_PRESENT=cpu` | Skip DMABUF sharing and copy frames through the CPU. Automatic if the import fails. |
 | `GHOSTTY_KMS_FLIP_Y=1` | Flip the image vertically, for a driver that gets orientation wrong. |
 | `GHOSTTY_KMS_REPEAT_DELAY` / `GHOSTTY_KMS_REPEAT_RATE` | Key repeat delay (ms, default 400) and rate (Hz, default 25). |
@@ -113,14 +114,27 @@ no network. The binary lands in `upstream/zig-out/bin/ghostty`.
 
 ### Raspberry Pi
 
-`ghostty-kms-rpi` (aarch64) bundles a Mesa trimmed to llvmpipe + the
-Pi's vc4/v3d drivers, for Pis without GPU drivers installed
-(`hardware.graphics` off). It renders with llvmpipe
-(`GHOSTTY_KMS_RENDER_DEVICE=software`) since V3D lacks desktop GL 4.3, and
-presents with the V3D GPU. Run it from a VT login. On a Pi 5 use the
-official 27 W supply: llvmpipe at high resolutions can use all four cores
-and brown out weaker ones (`GHOSTTY_KMS_MODE=1920x1080@60` and
-`LP_NUM_THREADS=2` reduce the load).
+`ghostty-kms-rpi` (aarch64) is for Pis without GPU drivers installed
+(`hardware.graphics` off). It bundles a Mesa with only the Pi's drivers
+and no software rasterizer:
+
+- presenter (blit + scanout): the native vc4/V3D driver, OpenGL ES 3.1
+- renderer: zink, i.e. desktop OpenGL on the V3DV Vulkan driver, on
+  `/dev/dri/renderD128`. V3D's own GL driver can't run Ghostty: it lacks
+  desktop GL 4.3 and allows no storage buffers in vertex shaders. Zink is
+  selected for the v3d device only, via a driconf file, and GL 4.3 is
+  enabled with `MESA_GL_VERSION_OVERRIDE` (Ghostty doesn't use the
+  tessellation shaders V3D lacks).
+
+Run it from a VT login. Use a solid supply (the official 27 W one); the Pi 5
+logs undervoltage under load on weaker ones.
+
+### Software rendering
+
+ghostty-kms refuses to run on a software rasterizer (llvmpipe and friends)
+unless `GHOSTTY_KMS_ALLOW_SOFTWARE=1` is set, since that keeps every core
+busy. The NixOS module's `softwareRendering` option sets it, as does the
+QEMU test guest.
 
 ### No GTK
 
@@ -173,4 +187,4 @@ mouse, and scroll; `tests/qemu/e2e.sh` runs a scripted check.
 | Intel/AMD + Mesa | Primary target. Builds; not yet run on real hardware (the DMABUF zero-copy path needs a real GPU to exercise). |
 | QEMU virtio-gpu + llvmpipe | `tests/qemu/e2e.sh` passes on aarch64 (HVF) and x86_64 (emulated). |
 | NVIDIA Jetson (JetPack 6) | Not yet tried. See CLAUDE.md "Hardware notes"; `GHOSTTY_KMS_RENDER_DEVICE` exists for the split render/display devices. |
-| Raspberry Pi 4/5 | Pi 5 (NixOS, no system GPU drivers): `ghostty-kms-rpi` reached first frame at 2560x1440@144 with the renderer on llvmpipe and the blit on V3D. Needs a proper 27 W supply; ours browned out under llvmpipe load. Input, VT switching etc. not yet checked on the Pi. |
+| Raspberry Pi 4/5 | Pi 5: `ghostty-kms-rpi` runs at 2560x1440@144 with the renderer on zink (V3DV) and the presenter on V3D, ~1% CPU idle. Input and VT switching not yet checked on the Pi. Pi 4 untried. |

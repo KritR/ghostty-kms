@@ -279,35 +279,20 @@
       default = ghostty-kms;
 
       # Raspberry Pi variant for systems without GPU userspace drivers
-      # (hardware.graphics disabled, or not NixOS): bundles a Mesa trimmed
-      # to llvmpipe + the Pi's vc4 (display) and v3d (GPU) drivers, KMS only,
-      # and renders with llvmpipe by default since V3D lacks desktop GL 4.3
-      # (the presenter's blit and scanout still use the V3D GPU).
-      # Override any of the variables to use the system's drivers instead.
+      # (hardware.graphics disabled, or not NixOS). Bundles a Mesa with only
+      # the Pi's drivers and no software rasterizer:
+      #
+      #   - presenter (blit + scanout): native vc4/v3d, OpenGL ES 3.1
+      #   - renderer: zink on V3DV (Vulkan), because V3D's own GL driver
+      #     lacks desktop GL 4.3 and allows no vertex-stage storage buffers
+      #
+      # zink is selected for the v3d render node only, through a driconf
+      # file, so the display device keeps its native driver.
       ghostty-kms-rpi = let
-        llvm = lib.getLib pkgs.mesa.llvmPackages.libllvm;
-
-        # llvmpipe only loads libLLVM.so, but Mesa's RUNPATH into LLVM's
-        # lib output keeps all of it (~350 MiB of static archives on top
-        # of the 177 MiB shared library). Ship just the shared library.
-        llvmShared = pkgs.runCommand "libllvm-shared-${pkgs.mesa.llvmPackages.libllvm.version}" {
-          nativeBuildInputs = [pkgs.patchelf pkgs.removeReferencesTo];
-        } ''
-          mkdir -p $out/lib
-          cp -P ${llvm}/lib/libLLVM*.so* $out/lib/
-          chmod -R u+w $out/lib
-          for f in $out/lib/*; do
-            [ -L "$f" ] && continue
-            rp=$(patchelf --print-rpath "$f")
-            patchelf --set-rpath "$(echo "$rp" | sed "s|${llvm}/lib|$out/lib|g")" "$f"
-            remove-references-to -t ${llvm} "$f"
-          done
-        '';
-
         mesa =
           (pkgs.mesa.override {
-            galliumDrivers = ["llvmpipe" "vc4" "v3d"];
-            vulkanDrivers = [];
+            galliumDrivers = ["vc4" "v3d" "zink"];
+            vulkanDrivers = ["broadcom"];
             vulkanLayers = [];
             eglPlatforms = [];
             withValgrind = false;
@@ -317,32 +302,57 @@
             inherit (slimFor pkgs) libdrm libgbm;
           }).overrideAttrs (o: {
             # nixpkgs builds with every auto feature on; without the X11
-            # platform these have to be off explicitly. The rest are for
-            # GPUs other than the Pi's.
+            # platform these have to be off explicitly. No LLVM: none of the
+            # Pi's drivers need it (it's for llvmpipe, radeonsi and OpenCL).
             mesonFlags =
-              (lib.filter (f: !(lib.any (p: lib.hasPrefix p f) ["-Dtools=" "-Dintel-rt=" "-Damdgpu-virtio=" "-Dfreedreno-kmds="])) o.mesonFlags)
-              ++ ["-Dxlib-lease=disabled" "-Dglx=disabled" "-Dtools=" "-Dintel-rt=disabled" "-Damdgpu-virtio=false" "-Dgallium-va=disabled"];
-            # Only populated by drivers we don't build (D3D12), but nixpkgs
-            # declares the output.
-            postInstall = (o.postInstall or "") + "\nmkdir -p $spirv2dxil\n";
-            # Point Mesa at the shared-library-only copy of LLVM.
-            nativeBuildInputs = o.nativeBuildInputs ++ [pkgs.removeReferencesTo];
-            postFixup =
-              (o.postFixup or "")
-              + ''
-                for f in $(find $out/lib -type f -name '*.so*'); do
-                  rp=$(patchelf --print-rpath "$f" 2>/dev/null) || continue
-                  case "$rp" in
-                    *${llvm}*)
-                      patchelf --set-rpath "$(echo "$rp" | sed "s|${llvm}/lib|${llvmShared}/lib|g")" "$f"
-                      # patchelf leaves the old RUNPATH string behind,
-                      # unused; scrub it so Nix doesn't keep LLVM's lib.
-                      remove-references-to -t ${llvm} "$f"
-                      ;;
-                  esac
-                done
-              '';
+              (lib.filter (f:
+                !(lib.any (p: lib.hasPrefix p f) [
+                  "-Dtools="
+                  "-Dintel-rt="
+                  "-Damdgpu-virtio="
+                  "-Dfreedreno-kmds="
+                  "-Dgallium-rusticl"
+                  "-Dclang-libdir="
+                  "-Dinstall-mesa-clc="
+                  "-Dinstall-precomp-compiler="
+                ]))
+              o.mesonFlags)
+              ++ [
+                "-Dxlib-lease=disabled"
+                "-Dglx=disabled"
+                "-Dtools="
+                "-Dintel-rt=disabled"
+                "-Damdgpu-virtio=false"
+                "-Dgallium-va=disabled"
+                "-Dllvm=disabled"
+                "-Dgallium-rusticl=false"
+                "-Dmesa-clc=auto"
+                "-Dinstall-mesa-clc=false"
+                "-Dinstall-precomp-compiler=false"
+              ];
+            # Outputs nixpkgs declares that only drivers/frontends we don't
+            # build populate.
+            postInstall = (o.postInstall or "") + "\nmkdir -p $spirv2dxil $opencl $cross_tools\n";
+            # nixpkgs also adds zink's libvulkan RPATH to the OpenCL
+            # library, which isn't built without LLVM.
+            postFixup = lib.replaceStrings [" $opencl/lib/libRusticlOpenCL.so"] [""] o.postFixup;
           });
+
+        # Mesa's defaults plus: use zink for the v3d device (the render node).
+        drirc = pkgs.runCommand "ghostty-kms-rpi-drirc" {} ''
+          mkdir -p $out
+          cp ${mesa}/share/drirc.d/* $out/
+          cat > $out/99-ghostty-kms-rpi.conf <<'XML'
+          <?xml version="1.0" standalone="yes"?>
+          <driconf>
+            <device driver="loader" kernel_driver="v3d">
+              <application name="all">
+                <option name="dri_driver" value="zink"/>
+              </application>
+            </device>
+          </driconf>
+          XML
+        '';
       in
         pkgs.runCommand "ghostty-kms-rpi-${ghostty-kms.version}" {
           nativeBuildInputs = [pkgs.makeWrapper];
@@ -353,7 +363,11 @@
           makeWrapper ${ghostty-kms}/bin/ghostty $out/bin/ghostty \
             --set-default __EGL_VENDOR_LIBRARY_FILENAMES ${mesa}/share/glvnd/egl_vendor.d/50_mesa.json \
             --set-default GBM_BACKENDS_PATH ${mesa}/lib/gbm \
-            --set-default GHOSTTY_KMS_RENDER_DEVICE software
+            --set-default VK_DRIVER_FILES ${mesa}/share/vulkan/icd.d/broadcom_icd.aarch64.json \
+            --set-default DRIRC_CONFIGDIR ${drirc} \
+            --set-default GHOSTTY_KMS_RENDER_DEVICE /dev/dri/renderD128 \
+            --set-default MESA_GL_VERSION_OVERRIDE 4.3 \
+            --set-default MESA_GLSL_VERSION_OVERRIDE 430
           ln -s ${ghostty-kms}/share $out/share
         '';
 
