@@ -6,6 +6,12 @@ carried as a small patch series on top of upstream Ghostty and built with
 Nix. You get Ghostty's real renderer, fonts, Kitty graphics, themes and
 config.
 
+![Ghostty on the Linux console: images through the Kitty graphics protocol (timg), the 16-color palette, a 24-bit color sweep and text styles](docs/screenshot.png)
+
+*Straight off the KMS scanout (QEMU virtio-gpu); the images are `timg -pk`
+through the Kitty graphics protocol. Run `ghostty-demo` in the
+[test guest](#end-to-end-test-in-qemu) to reproduce it.*
+
 See [CLAUDE.md](CLAUDE.md) for the design and the reasoning behind it.
 
 ## Running
