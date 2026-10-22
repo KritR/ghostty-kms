@@ -198,7 +198,9 @@ in {
 
   config = lib.mkIf cfg.enable (lib.mkMerge [
     {
-      environment.systemPackages = [cfg.package];
+      # Ghostty's terminfo (xterm-ghostty) system-wide: `login`, su, sudo
+      # and the like drop the TERMINFO that Ghostty sets for its children.
+      environment.systemPackages = [cfg.package] ++ lib.optional (cfg.package ? terminfo) cfg.package.terminfo;
       hardware.graphics.enable = lib.mkDefault true;
       environment.sessionVariables = lib.mkIf cfg.softwareRendering {
         LIBGL_ALWAYS_SOFTWARE = "1";

@@ -80,6 +80,10 @@ check "session is on VT 1" grep -q "VTNr=1" <<<"$s"
 check "session is an active user session" bash -c "grep -q 'Class=user' <<<'$s' && grep -q 'Active=yes' <<<'$s'"
 check "user has a runtime dir" grep -aq "rt=/run/user/1000" "$log"
 
+# xterm-ghostty must resolve system-wide, not only through TERMINFO.
+q type "env -u TERMINFO infocmp xterm-ghostty >/dev/null 2>&1 && echo terminfo-ok > $serial\n"
+check "xterm-ghostty terminfo is installed system-wide" q wait-log "terminfo-ok" "$(secs 20)"
+
 # tty2: a second Ghostty, started on demand.
 q key ctrl-alt-f2
 check "switching to tty2 starts Ghostty there" q wait-log "Started Ghostty console on tty2" "$(secs 30)"

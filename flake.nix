@@ -68,6 +68,9 @@
 
       default = ghostty-kms;
 
+      # The README screenshot's demo (Kitty graphics, colors, styles).
+      ghostty-demo = import ./nix/ghostty-demo.nix {inherit pkgs ghostty-kms;};
+
       # Trimmed Mesa for a Raspberry Pi's hardware.graphics.package.
       mesa-rpi = import ./nix/mesa-rpi.nix {inherit lib pkgs;};
 
