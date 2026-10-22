@@ -1,4 +1,4 @@
-# ghostty-raw-term
+# ghostty-kms
 
 Ghostty running directly on the Linux console (DRM/KMS): no compositor,
 window manager or display server. It's a new Ghostty app runtime (`kms`)
@@ -14,33 +14,124 @@ through the Kitty graphics protocol. Run `ghostty-demo` in the
 
 See [CLAUDE.md](CLAUDE.md) for the design and the reasoning behind it.
 
-## Running
+## Quick start (NixOS)
 
-Build and run from a VT (Ctrl+Alt+F3 or similar, logged in on the text
-console, not over SSH and not inside another graphical session):
+You need:
+
+- NixOS (x86_64 or aarch64) with flakes enabled.
+- A GPU with desktop OpenGL 4.3 (Intel, AMD, NVIDIA), or one with a Vulkan
+  driver, which Ghostty then uses through zink (e.g. the Raspberry Pi 5).
+  There's no software-rendering fallback.
+- GPU drivers installed: `hardware.graphics.enable = true`. Any NixOS with
+  a desktop already has it; the module below turns it on.
+
+There's no binary cache, so the first build compiles Ghostty from source
+(a few minutes on a desktop; on small boards, build on another machine or a
+remote builder and copy it over).
+
+### 1. Try it
+
+Switch to a text console (Ctrl+Alt+F3), log in, and run:
 
 ```bash
-nix build .#ghostty-kms
+nix run github:KritR/ghostty-kms
+```
+
+It has to be started from a VT login: not over SSH and not from a terminal
+inside a desktop session. Your usual `~/.config/ghostty/config` applies.
+Ghostty exits when its shell does; Ctrl+Alt+F1..F12 switches VTs as usual.
+
+### 2. Install it
+
+Add the flake and enable the module in your system configuration:
+
+```nix
+# flake.nix
+{
+  inputs = {
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    ghostty-kms.url = "github:KritR/ghostty-kms";
+  };
+
+  outputs = { nixpkgs, ghostty-kms, ... }: {
+    nixosConfigurations.my-host = nixpkgs.lib.nixosSystem {
+      modules = [
+        ./configuration.nix
+        ghostty-kms.nixosModules.default
+        { programs.ghostty-kms.enable = true; }
+      ];
+    };
+  };
+}
 ```
 
 ```bash
-./result/bin/ghostty
+sudo nixos-rebuild switch --flake .#my-host
 ```
 
-Device access goes through libseat, so you need either a logind session
-(the default when you log in on a VT) or seatd with your user in its
-group. No root needed. Ctrl+Alt+F1..F12 switches VTs; Ghostty stops
-drawing while you're away and repaints when you come back.
+Then run `ghostty` from any VT login. The module installs Ghostty, its
+terminfo (`xterm-ghostty`) and enables `hardware.graphics`.
 
-Your normal Ghostty config (`~/.config/ghostty/config`) applies. Things
-that only make sense with a windowing system (tabs, splits, window
-decorations, quick terminal, ...) are ignored. The terminal exits when its
-shell does.
+### 3. Make it the login console
+
+To get Ghostty instead of the plain text console on some VTs, with the
+login prompt inside Ghostty:
+
+```nix
+programs.ghostty-kms = {
+  enable = true;
+  console = {
+    enable = true;
+    ttys = ["tty2" "tty3"];      # default: tty2..tty6; tty1 stays getty
+    settings = {                 # Ghostty config for the console
+      font-size = 13;
+      theme = "Catppuccin Mocha";
+    };
+    environment.GHOSTTY_KMS_MODE = "1920x1080@60";  # optional, see below
+  };
+};
+```
+
+After `nixos-rebuild switch`, switch to tty2. Logging out gives a fresh
+prompt, like getty, and your session is a normal logind session on the seat
+(`/run/user/<uid>`, user services, device access). If Ghostty can't start on
+a VT (say, after a broken GPU driver update) that VT falls back to a plain
+getty. Keeping tty1 as getty gives you a console that doesn't depend on
+Ghostty at all.
+
+### Raspberry Pi
+
+Works on a Pi 5 (Pi 4 untried). V3D has no desktop OpenGL 4.3, so Ghostty
+renders through zink on its Vulkan driver automatically. Optionally, use a
+much smaller Mesa with only the Pi's drivers:
+
+```nix
+hardware.graphics.package = ghostty-kms.packages.aarch64-linux.mesa-rpi;
+```
+
+Use a solid power supply (the official 27 W one); a Pi 5 on a weak supply or
+cable logs undervoltage and can switch itself off.
+
+### Troubleshooting
+
+Ghostty's log goes to stderr (`ghostty 2>/tmp/ghostty.log`); for the
+console, `journalctl -u autovt@tty2`.
+
+| Message | Meaning |
+| --- | --- |
+| `timed out waiting for the seat to become active` | Not started from a VT login (SSH, or inside a desktop session). |
+| `no DRM device with a connected display found` | No connected output found; check the cable, or pick one with `GHOSTTY_KMS_DEVICE` / `GHOSTTY_KMS_CONNECTOR`. |
+| `zink isn't available` | The GPU lacks desktop GL 4.3 and Mesa has no zink or Vulkan driver for it. nixpkgs' default Mesa has both; check `hardware.graphics.enable`. |
+| `would use software rendering; refusing` | No usable GPU (typically a VM). `GHOSTTY_KMS_ALLOW_SOFTWARE=1` allows llvmpipe. |
+| A console VT shows a plain login | Ghostty failed to start there and the VT fell back to getty; see its journal. |
+
+## Reference
 
 ### kms settings
 
 Console-specific settings are environment variables, so we don't have to
-patch Ghostty's config parser:
+patch Ghostty's config parser (for the console, set them in
+`programs.ghostty-kms.console.environment`):
 
 | Variable | Meaning |
 | --- | --- |
@@ -56,46 +147,11 @@ patch Ghostty's config parser:
 | `GHOSTTY_KMS_SEAT_TIMEOUT` | How long to wait for the seat to become active (ms, default 10000). |
 | `XKB_DEFAULT_LAYOUT`, `XKB_DEFAULT_VARIANT`, `XKB_DEFAULT_OPTIONS`, ... | Keyboard layout, read by xkbcommon. Default: `us`. |
 
-Ghostty's log goes to stderr; redirect it to a file if you want to read it
-after exiting (`./result/bin/ghostty 2>/tmp/ghostty.log`).
+Everything else is regular Ghostty config. Things that only make sense
+with a windowing system (tabs, splits, window decorations, quick terminal,
+...) are ignored.
 
-### As the login console (NixOS)
-
-The flake's NixOS module can make Ghostty the login console on chosen VTs,
-in place of getty: each VT shows a login prompt inside Ghostty, logging out
-gives a fresh one, and other VTs keep getty. To use it from another flake:
-
-```nix
-{
-  inputs.ghostty-raw-term.url = "git+ssh://...";  # wherever this repo lives
-
-  outputs = { nixpkgs, ghostty-raw-term, ... }: {
-    nixosConfigurations.my-host = nixpkgs.lib.nixosSystem {
-      modules = [
-        ghostty-raw-term.nixosModules.default
-        {
-          programs.ghostty-kms = {
-            enable = true;
-            console = {
-              enable = true;
-              ttys = ["tty2" "tty3"];  # default: tty2..tty6, tty1 stays getty
-              settings = { font-size = 13; theme = "Catppuccin Mocha"; };
-              environment.GHOSTTY_KMS_MODE = "1920x1080@60";  # optional
-            };
-          };
-        }
-      ];
-    };
-  };
-}
-```
-
-The module enables `hardware.graphics` (GPU drivers in `/run/opengl-driver`).
-On a Raspberry Pi you can also set
-`hardware.graphics.package = ghostty-raw-term.packages.aarch64-linux.mesa-rpi;`,
-a much smaller Mesa with just the Pi's drivers (see below).
-
-How it fits together, for when something looks off:
+### How the login console works
 
 - Each VT is a systemd unit `autovt@ttyN.service`, which logind starts on
   demand when you switch to the VT (tty1 at boot), exactly like getty. It
@@ -162,6 +218,9 @@ scripts/                 development helpers
 
 ## Development
 
+From a checkout, `nix build .#ghostty-kms` builds the package
+(`./result/bin/ghostty`), and `nix build .#mesa-rpi` the Pi's Mesa.
+
 The fast loop is an incremental `zig build` in a checkout of upstream with
 the patches applied and `src/apprt/kms` symlinked to `apprt-kms/`:
 
@@ -195,19 +254,11 @@ rasterizer explicitly, for VMs without a GPU.
 
 ### Raspberry Pi
 
-ghostty-kms needs the system's Mesa (`hardware.graphics.enable = true`, which
-the NixOS module sets). nixpkgs' default Mesa works; `mesa-rpi` (aarch64) is
-a much smaller one for `hardware.graphics.package`, with only the Pi's
-drivers: vc4/v3d, zink and the V3DV Vulkan driver, no software rasterizer,
-no LLVM. V3D can't run Ghostty natively (no desktop GL 4.3, and no storage
-buffers in vertex shaders), so ghostty-kms renders through zink as above.
-
-```nix
-hardware.graphics.package = ghostty-raw-term.packages.aarch64-linux.mesa-rpi;
-```
-
-Run it from a VT login. Use a solid supply (the official 27 W one); the Pi 5
-logs undervoltage under load on weaker ones.
+`mesa-rpi` (aarch64) is nixpkgs' Mesa cut down to the Pi's drivers: vc4/v3d,
+zink and the V3DV Vulkan driver, no software rasterizer, no LLVM. V3D can't
+run Ghostty natively (no desktop GL 4.3, and no storage buffers in vertex
+shaders), so ghostty-kms renders through zink as above. See
+[Raspberry Pi](#raspberry-pi) in the quick start for using it.
 
 ### No GTK
 
