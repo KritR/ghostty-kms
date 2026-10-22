@@ -176,13 +176,14 @@ Rules:
   glib/GObject introspection, GStreamer, X11, Wayland or wrapGAppsHook4. It
   also slims dependencies whose default nixpkgs builds link desktop libraries
   (harfbuzz without glib, libxkbcommon without X11/Wayland, libinput without
-  libwacom, libglvnd without GLX), uses a copy of upstream's Zig dependency
+  libwacom, libglvnd without GLX, libdrm without libdrm_intel so hwdata's PCI
+  ID database drops out, and libgbm rebuilt against that libdrm), uses a copy of upstream's Zig dependency
   cache without the GTK/Wayland binding packages (all lazy, only the GTK
   runtime requests them), generates xkbcommon's Compose data from the libX11
   source instead of the libX11 package, and deletes the libghostty-vt
   library upstream always installs. `disallowedRequisites` fails the build if
-  any of that comes back into the runtime closure (118 MiB on x86_64, down
-  from 3.2 GiB); `scripts/check-no-gtk.sh` also checks what the build
+  any of that comes back into the runtime closure (106 MiB on x86_64, down
+  from 3.2 GiB; most of what's left is glibc, libstdc++ and Ghostty itself); `scripts/check-no-gtk.sh` also checks what the build
   fetches and builds. Expect these overrides to need touching on upstream or
   nixpkgs bumps.
 - **Updating:** bump the pinned rev, rebuild, fix any failing hunks. Keep a

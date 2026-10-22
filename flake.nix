@@ -107,6 +107,19 @@
           postFixup = "";
         });
 
+        # libdrm_intel is the only libdrm library that links libpciaccess,
+        # which drags in hwdata's 10 MiB PCI ID database. Nothing we load
+        # uses it (Mesa's Intel drivers don't either).
+        libdrm = pkgs.libdrm.override {withIntel = false;};
+
+        # The same gbm-only Mesa build as nixpkgs', against that libdrm.
+        # Upstream propagates libdrm, which leaves libdrm's -dev output in
+        # the runtime closure; we list libdrm in our own buildInputs instead.
+        libgbm = (pkgs.libgbm.override {inherit libdrm;}).overrideAttrs (o: {
+          propagatedBuildInputs = [];
+          buildInputs = (o.buildInputs or []) ++ [libdrm];
+        });
+
         # libwacom (tablets) pulls in glib and libgudev; Lua plugins aren't
         # needed for a terminal.
         libinput = pkgs.libinput.override {
@@ -170,8 +183,8 @@
           spirv-cross
           # The kms runtime.
           slim.libglvnd # libEGL + libGLESv2
-          libdrm
-          libgbm
+          slim.libdrm
+          slim.libgbm
           slim.libinput
           slim.libxkbcommon
           seatd

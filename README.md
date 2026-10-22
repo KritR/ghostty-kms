@@ -114,7 +114,7 @@ no network. The binary lands in `upstream/zig-out/bin/ghostty`.
 ### No GTK
 
 The package is built without GTK and its neighbours (glib/GObject,
-GStreamer, X11, Wayland, ...): the runtime closure is about 120 MiB, and
+GStreamer, X11, Wayland, ...): the runtime closure is about 106 MiB on x86_64 (mostly glibc, libstdc++ and Ghostty itself), and
 the build fails if any of them sneak back in. To check what a build
 fetches and builds as well:
 
